@@ -160,6 +160,7 @@
             <div class="step-tab" data-step="2" onclick="showStep(2)">② テロップ生成</div>
             <div class="step-tab disabled" data-step="3" onclick="showStep(3)">③ BGM</div>
             <div class="step-tab disabled" data-step="4" onclick="showStep(4)">④ トークテーマ</div>
+            <div class="step-tab" data-step="5" onclick="showStep(5)">⑤ 挟み込み</div>
         </div>
 
         <div class="step-content active" data-step="1">
@@ -183,6 +184,17 @@
 
         <div class="step-content" data-step="4">
             <div class="coming-soon">準備中です。<br>話している内容から見出しを自動生成する機能は今後追加予定です。</div>
+        </div>
+
+        <div class="step-content" data-step="5">
+            <button onclick="runInsertBroll()" id="insertBrollBtn">インサート動画を自動挿入</button>
+            <div class="file-label" style="margin:0 0 10px;">
+                音声の内容を解析し、フォルダ名をタグとみなして合う素材を自動で挟み込む
+                (全体の30〜40%程度、1テイクは文の頭から次の文の頭まで・7秒超は2本に分割)。
+                Gemini APIキー(automation-server/.envのGEMINI_API_KEY)が設定されていれば
+                そちらで内容判定、無ければキーワード辞書で判定する。
+                新しく追加したビデオトラックに配置される。
+            </div>
         </div>
     </section>
 

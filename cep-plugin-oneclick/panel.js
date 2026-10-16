@@ -52,7 +52,7 @@
     }
 
     function setButtonsEnabled(enabled) {
-        ['jumpCutBtn'].forEach(function (id) {
+        ['jumpCutBtn', 'insertBrollBtn'].forEach(function (id) {
             var btn = document.getElementById(id);
             if (btn) btn.disabled = !enabled;
         });
@@ -148,6 +148,34 @@
             );
         } catch (e) {
             log('ジャンプカット失敗: ' + e.message, 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    };
+
+    window.runInsertBroll = async function () {
+        var btn = document.getElementById('insertBrollBtn');
+        btn.disabled = true;
+        log('インサート動画を解析中… (文字起こし → 内容判定 → 挿入)', 'info');
+        try {
+            var result = await fetchJSON('/insert-broll', 'POST', {});
+            if (result.message) {
+                log(result.message, 'info');
+            } else {
+                log(
+                    'インサート挿入完了: "' + result.sequenceName + '" / ' + result.inserted + '箇所' +
+                    ' / カバー率 約' + result.coveragePercent + '%' +
+                    ' / 判定方法: ' + (result.matchSource === 'gemini' ? 'Gemini' : 'キーワード辞書') +
+                    ' / フォルダ: ' + (result.folders || []).join('、'),
+                    'ok'
+                );
+                if (result.geminiError) log('Gemini注意: ' + result.geminiError + ' (キーワード辞書にフォールバックしました)', 'error');
+                if (result.errors && result.errors.length > 0) {
+                    result.errors.forEach(function (e) { log('注意: ' + e, 'error'); });
+                }
+            }
+        } catch (e) {
+            log('インサート動画の挿入に失敗: ' + e.message, 'error');
         } finally {
             btn.disabled = false;
         }

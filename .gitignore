@@ -19,3 +19,7 @@ release-artifacts/
 
 # Cloudflare
 .wrangler/
+
+# Local secrets (API keys)
+.env
+automation-server/.env

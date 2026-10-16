@@ -16,6 +16,24 @@ const path = require('path');
 const os = require('os');
 const { spawn } = require('child_process');
 
+// CEPパネル(panel.js)がこのサーバーをchild_processとして起動する際、環境変数は
+// 渡していないため、APIキー等は同じディレクトリの.env(.gitignore対象)から読む。
+// 依存を増やさないよう、npmのdotenvは使わず自前で簡易パースする。
+(function loadDotEnv() {
+  const envPath = path.join(__dirname, '.env');
+  if (!fs.existsSync(envPath)) return;
+  const lines = fs.readFileSync(envPath, 'utf8').split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq < 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const val = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
+    if (key && !(key in process.env)) process.env[key] = val;
+  }
+})();
+
 const PORT = process.env.EDITFLUX_PORT ? parseInt(process.env.EDITFLUX_PORT, 10) : 4747;
 // os.tmpdir()はmacOSでは/var/folders/.../T(ユーザーごとのTMPDIR)を返し、/tmpとは別物。
 // MCP Bridge (CEP)パネル側(bridge-cep.js)はWindows以外では常に素の'/tmp'を既定値として
@@ -1461,6 +1479,364 @@ async function workflowInsertMedia(opts) {
   return result;
 }
 
+// ───────────────────────── インサート(挟み込み)自動挿入 ─────────────────────────
+//
+// 「話している内容に合うB-roll素材を自動で見つけて挟み込む」機能。
+// Claude(LLM)にその都度判定してもらう方式はAPIキー・実行コストが発生し、かつパネルの
+// ボタンからは呼び出せない(ユーザーとの会話の中でしか動けない)ため不採用。
+// 代わりに、素材フォルダ名(ユーザーが既に「悩む」「資格」等のテーマ別に整理済み)を
+// タグとみなし、Whisperの文字起こし結果に含まれるキーワードでフォルダを選ぶ
+// ルールベース方式にした(無料・オフラインで動く)。
+
+const BROLL_ROOT = process.env.EDITFLUX_BROLL_ROOT
+  || path.join(os.homedir(), 'Downloads', '広告動画作成素材', '広告素材');
+const BROLL_VIDEO_EXT = new Set(['.mp4', '.mov', '.m4v']);
+
+// フォルダ名 → そのフォルダが合う内容を示すキーワード。文字起こしテキストに
+// これらの単語が含まれていたら、そのフォルダをB-roll候補として加点する。
+// 同じテーマのフォルダが複数ある場合(パソコン系・手元系など)は同じキーワード群を
+// 共有させ、マッチ時にその中からランダムに1つ選ぶ。
+const BROLL_KEYWORDS = {
+  '笑顔': ['嬉しい', '楽しい', '幸せ', '喜び', 'よかった', '笑'],
+  '悩む': ['悩み', '悩ん', '困った', '困って', '迷っ', '不安', '心配', 'つらい', '苦し'],
+  '忙しい': ['忙し', '大変', '多忙', '時間がない'],
+  '驚く': ['驚', 'びっくり', 'まさか', '信じられ'],
+  '怒る': ['怒', '腹が立', 'イライラ', 'ムカ'],
+  '退屈・面倒': ['退屈', '面倒', 'だるい', 'やる気が出ない'],
+  '風邪': ['風邪', '体調不良', '熱が', '咳'],
+  'パソコン・手元': ['パソコン', 'PC', '入力', 'タイピング', '作業'],
+  'パソコン・人': ['パソコン', 'PC', '入力', 'タイピング', '作業'],
+  '手元（+もの）': ['パソコン', '作業', '手元'],
+  '手だけ': ['パソコン', '作業', '手元'],
+  'スポーツ': ['スポーツ', '運動', 'トレーニング', '筋トレ'],
+  'セミナー・Zoom': ['セミナー', 'Zoom', 'オンライン講座', '講座', '勉強会'],
+  'オフィス＋会議＋話す': ['会議', '打ち合わせ', 'オフィス', '話し合い', '相談'],
+  '子育て＋子供＋家族': ['子育て', '子供', '子ども', '家族', '育児'],
+  '言い合い': ['言い合い', '口論', '喧嘩', '反論'],
+  '占い師': ['占い', '占い師', '運勢', 'タロット'],
+  '不動産': ['不動産', '大家', '賃貸', '物件', '家賃'],
+  '治療家＋医療系＋介護': ['治療', '医療', '病院', '介護', '施術', '整体'],
+  '美容＋ジムサロン': ['美容', 'ジム', 'サロン', 'エステ', 'ダイエット'],
+  '料理': ['料理', '食べ', 'レシピ', '食事'],
+  '歯': ['歯医者', '歯科'],
+  '50代リストラ系': ['50代', '60代', '定年', 'リストラ', '早期退職', '会社を辞め'],
+  'AI': ['AI', '人工知能', 'チャットGPT', '自動化'],
+  '本・ノート': ['勉強', 'ノート', '学ん', '学び', '読書'],
+  '電卓': ['計算', '電卓', '収支'],
+  'お金ゼロ': ['ゼロ円', 'お金がない', '売上ゼロ', '収入ゼロ', '売上は、ゼロ'],
+  'SNS': ['SNS', 'インスタ', 'ツイッター', '発信'],
+  '時計': ['時間', '締め切り', '期限'],
+  '資格': ['資格', '検定', '免許', 'キャリアコンサルタント'],
+  '服': ['ファッション', '着替え'],
+  '涙': ['涙', '泣', '悲し'],
+  'チャンネル登録': ['チャンネル登録', 'フォロー', '高評価'],
+  '分析': ['分析', 'データ', 'グラフ'],
+  '着物': ['着物', '和服'],
+  '運転': ['運転', 'ドライブ'],
+  '戦争': ['戦争', '争い'],
+  '農家': ['農家', '農業', '畑'],
+  '女性': ['彼女', '主婦'],
+  '男性': ['彼は', '父親'],
+  '結婚': ['結婚', '夫婦', '離婚'],
+  '景色': ['景色', '風景', '自然'],
+  '背景+挿絵＋❔': ['疑問', 'わからない'],
+  '地図': ['地図', 'エリア', '地域'],
+  '旅行': ['旅行', '観光'],
+};
+
+function listBrollFolders() {
+  if (!fs.existsSync(BROLL_ROOT)) return [];
+  return fs.readdirSync(BROLL_ROOT, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name);
+}
+
+function listBrollFiles(folderName) {
+  const dir = path.join(BROLL_ROOT, folderName);
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .filter((f) => BROLL_VIDEO_EXT.has(path.extname(f).toLowerCase()))
+    .map((f) => path.join(dir, f));
+}
+
+// テキストにマッチするフォルダ候補を、マッチしたキーワード数が多い順に返す。
+// 実在する(=ファイルが1本以上ある)フォルダのみを対象にする。
+function matchBrollFolders(text, existingFolders) {
+  const scores = [];
+  for (const [folder, keywords] of Object.entries(BROLL_KEYWORDS)) {
+    if (!existingFolders.has(folder)) continue;
+    let score = 0;
+    for (const kw of keywords) {
+      if (text.indexOf(kw) >= 0) score++;
+    }
+    if (score > 0) scores.push({ folder, score });
+  }
+  scores.sort((a, b) => b.score - a.score);
+  return scores;
+}
+
+// 無音カットと同じ考え方で、Whisperのセグメント開始〜次のセグメント開始までを
+// 「文の頭から次の文の頭まで」の1テイクとみなす(ユーザーの編集ガイドライン通り)。
+// 7秒を超えるテイクは2本に分割する。
+function buildBrollTakes(rawCaptions) {
+  const takes = [];
+  for (let i = 0; i < rawCaptions.length; i++) {
+    const cur = rawCaptions[i];
+    const next = rawCaptions[i + 1];
+    const takeEnd = next ? next.start : cur.end;
+    if (takeEnd <= cur.start) continue;
+    const duration = takeEnd - cur.start;
+    if (duration > 7) {
+      const mid = cur.start + duration / 2;
+      takes.push({ start: cur.start, end: mid, text: cur.text });
+      takes.push({ start: mid, end: takeEnd, text: cur.text });
+    } else {
+      takes.push({ start: cur.start, end: takeEnd, text: cur.text });
+    }
+  }
+  return takes;
+}
+
+// Gemini(Google AI Studio、無料枠あり)に、セリフ一覧と候補フォルダ名を渡して
+// 各セリフに最も合うフォルダを判定してもらう。キーワード辞書より言い回しの揺れに強い。
+// GEMINI_API_KEYが未設定、またはAPI呼び出しに失敗した場合はnullを返し、
+// 呼び出し側でキーワード辞書方式にフォールバックする。
+async function geminiMatchTakes(takes, folderNames) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return null;
+
+  const items = takes.map((t, i) => `${i}: ${t.text}`).join('\n');
+  const prompt = '以下は動画のセリフを時系列順に並べたものです。各セリフの内容に最も合う「挿し込み動画(B-roll)」の' +
+    'フォルダ名を、次の候補から1つ選んでください。合う候補が無ければfolderをnullにしてください。\n\n' +
+    `候補フォルダ: ${folderNames.join('、')}\n\n` +
+    `セリフ一覧:\n${items}\n\n` +
+    `出力はJSON配列で、インデックス順にちょうど${takes.length}個の要素を返してください。` +
+    '各要素は {"folder": string|null, "score": number(0〜1の確信度)} の形式にしてください。';
+
+  const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { responseMimeType: 'application/json', temperature: 0.2 }
+      })
+    }
+  );
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Gemini APIエラー (${res.status}): ${errText.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  const text = data.candidates && data.candidates[0] && data.candidates[0].content &&
+    data.candidates[0].content.parts && data.candidates[0].content.parts[0] &&
+    data.candidates[0].content.parts[0].text;
+  if (!text) throw new Error('Geminiから有効な応答がありませんでした');
+  let parsed;
+  try { parsed = JSON.parse(text); } catch (e) {
+    throw new Error('Geminiの応答がJSONとして解析できませんでした: ' + text.slice(0, 200));
+  }
+  if (!Array.isArray(parsed)) throw new Error('Geminiの応答が配列ではありません');
+  return parsed;
+}
+
+// takes(候補)の中からマッチしたものだけを残し、合計尺が動画全体の
+// 30〜40%(目安35%)に収まるよう、マッチ度の高い順に採用していく。
+// Gemini APIキーがあればそちらを優先し、無ければ/失敗すればキーワード辞書方式を使う。
+async function buildBrollPlan(rawCaptions, totalDurationSec) {
+  const existingFolders = new Set(
+    listBrollFolders().filter((f) => listBrollFiles(f).length > 0)
+  );
+  const takes = buildBrollTakes(rawCaptions);
+
+  let matchSource = 'keyword';
+  let geminiResults = null;
+  let geminiError = null;
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      geminiResults = await geminiMatchTakes(takes, Array.from(existingFolders));
+      if (geminiResults) matchSource = 'gemini';
+    } catch (e) {
+      geminiError = e.message;
+    }
+  }
+
+  const candidates = [];
+  takes.forEach((take, i) => {
+    let folder = null;
+    let score = 0;
+    const g = geminiResults && geminiResults[i];
+    if (g && g.folder && existingFolders.has(g.folder)) {
+      folder = g.folder;
+      score = typeof g.score === 'number' ? g.score : 0.5;
+    } else if (!geminiResults) {
+      const matches = matchBrollFolders(take.text, existingFolders);
+      if (matches.length > 0) { folder = matches[0].folder; score = matches[0].score; }
+    }
+    if (folder) candidates.push({ start: take.start, end: take.end, duration: take.end - take.start, folder, score });
+  });
+  candidates.sort((a, b) => b.score - a.score || b.duration - a.duration);
+
+  const targetDuration = totalDurationSec * 0.35;
+  const maxDuration = totalDurationSec * 0.4;
+  const selected = [];
+  let usedDuration = 0;
+  for (const c of candidates) {
+    if (usedDuration + c.duration > maxDuration) continue;
+    selected.push(c);
+    usedDuration += c.duration;
+    if (usedDuration >= targetDuration) break;
+  }
+  selected.sort((a, b) => a.start - b.start);
+
+  // 同じフォルダから連続で同じファイルを選ばないよう、フォルダごとに直近使ったファイルを覚えておく
+  const lastUsedByFolder = {};
+  const plan = selected.map((c) => {
+    const files = listBrollFiles(c.folder);
+    let pick = files[Math.floor(Math.random() * files.length)];
+    if (files.length > 1 && pick === lastUsedByFolder[c.folder]) {
+      pick = files[(files.indexOf(pick) + 1) % files.length];
+    }
+    lastUsedByFolder[c.folder] = pick;
+    return { start: c.start, end: c.end, duration: c.duration, folder: c.folder, filePath: pick };
+  });
+
+  return {
+    plan,
+    coverageRatio: totalDurationSec > 0 ? usedDuration / totalDurationSec : 0,
+    matchSource,
+    geminiError
+  };
+}
+
+// 1本の新規ビデオトラックを最上段に追加し、plan内の各クリップをそのトラックの
+// 指定時刻に配置して指定尺にトリムする。同じファイルを複数回使う場合はインポートを
+// 使い回す(importFilesを毎回呼ぶと重複登録されるため、パス→projectItemのキャッシュを
+// スクリプト内で保持する)。
+function scriptInsertBrollPlan(plan) {
+  const planJSON = JSON.stringify(plan.map((p) => ({ filePath: p.filePath, start: p.start, duration: p.duration })));
+  return `${QE_HELPERS}
+(function(){
+    try {
+      var items = ${planJSON};
+      var seq = app.project.activeSequence;
+      if (!seq) return JSON.stringify({ success: false, error: 'アクティブなシーケンスがありません' });
+
+      var qeSeq = __qeSequenceFor(seq);
+      var beforeTracks = seq.videoTracks.numTracks;
+      if (qeSeq) { try { qeSeq.addTracks(1, beforeTracks, 0, 1, 0, 0, 0); } catch (eAdd) {} }
+      var trackIdx = seq.videoTracks.numTracks > beforeTracks ? seq.videoTracks.numTracks - 1 : beforeTracks - 1;
+      var track = seq.videoTracks[trackIdx];
+
+      function walk(parent, out) {
+        for (var i = 0; i < parent.children.numItems; i++) {
+          var c = parent.children[i];
+          out.push(c);
+          if (c.type === ProjectItemType.BIN) walk(c, out);
+        }
+      }
+
+      var itemCache = {};
+      var insertedCount = 0;
+      var errors = [];
+
+      for (var idx = 0; idx < items.length; idx++) {
+        var it = items[idx];
+        try {
+          var projItem = itemCache[it.filePath];
+          if (!projItem) {
+            var before = []; walk(app.project.rootItem, before);
+            var ok = app.project.importFiles([it.filePath], true, app.project.rootItem, false);
+            if (!ok) { errors.push(it.filePath + ': インポート失敗'); continue; }
+            var after = []; walk(app.project.rootItem, after);
+            for (var i = 0; i < after.length; i++) {
+              var isNew = true;
+              for (var j = 0; j < before.length; j++) {
+                if (String(before[j].nodeId) === String(after[i].nodeId)) { isNew = false; break; }
+              }
+              if (isNew) { projItem = after[i]; break; }
+            }
+            if (!projItem) continue;
+            itemCache[it.filePath] = projItem;
+          }
+
+          var atTime = new Time();
+          atTime.seconds = it.start;
+          var inserted = false;
+          try { inserted = track.overwriteClip(projItem, atTime); } catch (eOv) {}
+          if (!inserted) { try { inserted = track.insertClip(projItem, atTime); } catch (eIn) {} }
+          if (inserted) {
+            insertedCount++;
+            try {
+              var newClip = track.clips[track.clips.numItems - 1];
+              var endTime = new Time();
+              endTime.seconds = it.start + it.duration;
+              newClip.end = endTime;
+            } catch (eTrim) {}
+          } else {
+            errors.push(it.filePath + ': 配置失敗');
+          }
+        } catch (eItem) { errors.push(it.filePath + ': ' + String(eItem)); }
+      }
+
+      app.project.save();
+      return JSON.stringify({ success: true, insertedCount: insertedCount, trackIndex: trackIdx, errors: errors });
+    } catch (e) { return JSON.stringify({ success: false, error: String(e) }); }
+})();`;
+}
+
+async function workflowInsertBroll(opts) {
+  if (!fs.existsSync(BROLL_ROOT)) {
+    throw new Error(`素材フォルダが見つかりません: ${BROLL_ROOT}`);
+  }
+  const language = opts.language || 'ja';
+  const model = opts.model || 'small';
+
+  const info = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO);
+  const clips = (info.audio && info.audio[0] && info.audio[0].clips) || [];
+  if (clips.length === 0) {
+    throw new Error('オーディオトラック0(A1)にクリップがありません。');
+  }
+  const paths = uniqueMediaPaths(clips);
+  if (paths.length === 0) throw new Error('A1クリップのメディアパスを取得できませんでした。');
+
+  const jobDir = ensureDir(path.join(WORK_DIR, `broll-${Date.now()}`));
+  const captionsByPath = {};
+  for (const p of paths) {
+    const outDir = ensureDir(path.join(jobDir, Buffer.from(p).toString('hex').slice(0, 24)));
+    captionsByPath[p] = await transcribeFile(p, language, model, outDir);
+  }
+
+  const rawCaptions = mapIntervalsToTimeline(clips, captionsByPath, (iv) => ({ text: iv.text }));
+  if (rawCaptions.length === 0) {
+    return { success: true, message: '音声から文字を検出できませんでした。', sequenceName: info.name, inserted: 0 };
+  }
+  rawCaptions.sort((a, b) => a.start - b.start);
+
+  const totalDurationSec = info.durationSec || rawCaptions[rawCaptions.length - 1].end;
+  const { plan, coverageRatio, matchSource, geminiError } = await buildBrollPlan(rawCaptions, totalDurationSec);
+  if (plan.length === 0) {
+    return { success: true, message: '合致する箇所が見つかりませんでした。素材フォルダか判定方法を見直してください。', sequenceName: info.name, inserted: 0, matchSource, geminiError };
+  }
+
+  const result = await evalJSON(scriptInsertBrollPlan(plan));
+
+  return {
+    success: true,
+    sequenceName: info.name,
+    inserted: result.insertedCount || 0,
+    planned: plan.length,
+    coveragePercent: Math.round(coverageRatio * 1000) / 10,
+    folders: plan.map((p) => p.folder),
+    trackIndex: result.trackIndex,
+    errors: result.errors || [],
+    matchSource: matchSource,
+    geminiError: geminiError
+  };
+}
+
 async function checkHealth() {
   try {
     const info = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO, 8000);
@@ -1501,6 +1877,7 @@ const ROUTES = {
   '/telop': { method: 'POST', handler: (body) => workflowTelop(body || {}) },
   '/telop-refine': { method: 'POST', handler: (body) => workflowRefineNativeCaptions(body || {}) },
   '/insert-media': { method: 'POST', handler: (body) => workflowInsertMedia(body || {}) },
+  '/insert-broll': { method: 'POST', handler: (body) => workflowInsertBroll(body || {}) },
   '/telop-presets': { method: 'GET', handler: async () => ({ presets: listTelopPresets(), dir: TELOP_PRESETS_DIR }) }
 };
 
