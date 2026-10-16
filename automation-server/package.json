@@ -1,0 +1,9 @@
+{
+  "name": "editflux-automation-server",
+  "private": true,
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

@@ -17,6 +17,8 @@
 
 </div>
 
+> **このフォーク (EditFlux) 独自の追加:** ワンクリック日本語ボタンパネル（ジャンプカット・テロップ生成・メディア挿入）を追加しています。詳細は [ONECLICK.md](./ONECLICK.md) と [ROADMAP.md](./ROADMAP.md) を参照。
+
 **Languages:** English | [日本語](translations/README.ja.md) | [Tiếng Việt](translations/README.vi.md) | [简体中文](translations/README.zh-CN.md) | [繁體中文](translations/README.zh-TW.md) | [한국어](translations/README.ko.md) | [Deutsch](translations/README.de.md) | [Español](translations/README.es.md) | [Français](translations/README.fr.md) | [Italiano](translations/README.it.md) | [Dansk](translations/README.da.md) | [Polski](translations/README.pl.md) | [Русский](translations/README.ru.md) | [Bosanski](translations/README.bs.md) | [العربية](translations/README.ar.md) | [Norsk](translations/README.no.md) | [Português (Brasil)](translations/README.pt-BR.md) | [ไทย](translations/README.th.md) | [Türkçe](translations/README.tr.md) | [ភាសាខ្មែរ](translations/README.km.md)
 
 **Start here:** install the local bridge, open it in Premiere, then run `verify_premiere_connection` before editing. MCP hosts see a small always-on set; call `search_tools` then `invoke_tool` for the rest.

@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EditFlux ワンクリック編集</title>
+    <style>
+        :root {
+            --bg-0: #0b1218;
+            --bg-1: #121c25;
+            --panel: rgba(20, 31, 41, 0.86);
+            --panel-border: rgba(129, 170, 197, 0.18);
+            --text-0: #f4f8fb;
+            --text-1: #9cb2c3;
+            --text-2: #6e8393;
+            --accent: #5fd3ff;
+            --accent-strong: #11aef0;
+            --success: #61e8a6;
+            --warn: #ffd76b;
+            --error: #ff7b7b;
+        }
+        * { box-sizing: border-box; }
+        html, body { margin: 0; min-height: 100%; }
+        body {
+            font-family: "Hiragino Sans", "Avenir Next", "Segoe UI", sans-serif;
+            color: var(--text-0);
+            padding: 14px;
+            background: linear-gradient(165deg, var(--bg-0), var(--bg-1));
+        }
+        h1 { font-size: 16px; margin: 0 0 4px; }
+        .sub { font-size: 11px; color: var(--text-2); margin-bottom: 14px; }
+        .panel {
+            border: 1px solid var(--panel-border);
+            border-radius: 14px;
+            padding: 12px;
+            margin-bottom: 10px;
+            background: var(--panel);
+        }
+        .status-row { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 8px; }
+        .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--error); flex: 0 0 auto; }
+        .dot.ok { background: var(--success); }
+        button {
+            width: 100%;
+            appearance: none;
+            border: 0;
+            border-radius: 10px;
+            padding: 12px;
+            margin-bottom: 8px;
+            font-size: 13px;
+            font-weight: 700;
+            color: #081119;
+            cursor: pointer;
+            background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+        }
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
+        button.secondary { background: rgba(255,255,255,0.08); color: var(--text-0); }
+        input[type="file"] { display: none; }
+        .file-label {
+            display: block;
+            font-size: 11px;
+            color: var(--text-2);
+            margin-bottom: 8px;
+            word-break: break-all;
+        }
+        .opts { display: flex; gap: 6px; margin-bottom: 8px; }
+        .opts select {
+            flex: 1;
+            background: rgba(9,17,25,0.72);
+            color: var(--text-0);
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            padding: 6px;
+            font-size: 11px;
+        }
+        .log {
+            max-height: 180px;
+            overflow-y: auto;
+            font-size: 11px;
+            line-height: 1.5;
+        }
+        .log .entry { margin-bottom: 6px; padding: 6px 8px; border-radius: 8px; background: rgba(15,24,33,0.5); }
+        .log .entry.error { color: #ffadad; border-left: 3px solid var(--error); }
+        .log .entry.ok { color: #bdf3d6; border-left: 3px solid var(--success); }
+        .log .entry.info { border-left: 3px solid var(--accent); color: var(--text-1); }
+    </style>
+</head>
+<body>
+    <h1>EditFlux ワンクリック編集</h1>
+    <div class="sub">Premiere自動化パネル &middot; v0.1</div>
+
+    <section class="panel">
+        <div class="status-row">
+            <div class="dot" id="bridgeDot"></div>
+            <span id="bridgeText">Premiere Bridge: 確認中…</span>
+        </div>
+        <div class="status-row">
+            <div class="dot" id="serverDot"></div>
+            <span id="serverText">自動化サーバー: 確認中…</span>
+        </div>
+        <button class="secondary" onclick="startServer()" id="startServerBtn">自動化サーバーを起動</button>
+    </section>
+
+    <section class="panel">
+        <button onclick="runJumpCut()" id="jumpCutBtn">ジャンプカットを実行</button>
+        <div class="opts">
+            <select id="silenceThreshold">
+                <option value="-30">無音判定: 甘め(-30dB)</option>
+                <option value="-35" selected>無音判定: 標準(-35dB)</option>
+                <option value="-40">無音判定: 厳しめ(-40dB)</option>
+            </select>
+        </div>
+
+        <button onclick="runTelop()" id="telopBtn">テロップを生成</button>
+        <div class="opts">
+            <select id="whisperModel">
+                <option value="small" selected>精度: 標準(small)</option>
+                <option value="medium">精度: 高(medium・遅い)</option>
+            </select>
+        </div>
+
+        <input type="file" id="mediaFile" accept="video/*,image/*,audio/*" onchange="onFileChosen()">
+        <button onclick="document.getElementById('mediaFile').click()">メディアを選んで挿入</button>
+        <div class="file-label" id="fileLabel">(未選択)</div>
+    </section>
+
+    <section class="panel">
+        <div class="log" id="logContainer"></div>
+    </section>
+
+    <script src="CSInterface.js"></script>
+    <script src="panel.js"></script>
+</body>
+</html>
