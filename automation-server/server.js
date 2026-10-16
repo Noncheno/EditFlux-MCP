@@ -838,17 +838,10 @@ async function workflowTelop(opts) {
   const model = opts.model || 'small';
 
   const info = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO);
-  const audioTrack0 = (info.audio && info.audio[0] && info.audio[0].clips) || [];
-  if (audioTrack0.length === 0) {
+  const clips = (info.audio && info.audio[0] && info.audio[0].clips) || [];
+  if (clips.length === 0) {
     throw new Error('オーディオトラック0(A1)にクリップがありません。');
   }
-
-  const dup = await evalJSON(scriptDuplicateAndActivate(`${info.name} - Telop`));
-  if (!dup.activated) {
-    throw new Error('シーケンスの複製には成功しましたが、複製側へ切り替えられませんでした。Premiere上で手動でタブを切り替えてから再実行してください。');
-  }
-  const dupInfo = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO);
-  const clips = (dupInfo.audio && dupInfo.audio[0] && dupInfo.audio[0].clips) || [];
 
   const paths = uniqueMediaPaths(clips);
   if (paths.length === 0) throw new Error('A1クリップのメディアパスを取得できませんでした。');
@@ -862,7 +855,7 @@ async function workflowTelop(opts) {
 
   const timelineCaptions = mapIntervalsToTimeline(clips, captionsByPath, (iv) => ({ text: iv.text }));
   if (timelineCaptions.length === 0) {
-    return { success: true, message: '音声から文字を検出できませんでした。', sequenceName: dupInfo.name, captions: 0 };
+    return { success: true, message: '音声から文字を検出できませんでした。', sequenceName: info.name, captions: 0 };
   }
 
   const srtPath = path.join(jobDir, 'captions.srt');
@@ -872,7 +865,7 @@ async function workflowTelop(opts) {
 
   return {
     success: true,
-    sequenceName: dupInfo.name,
+    sequenceName: info.name,
     captions: timelineCaptions.length,
     srtPath: srtPath,
     captionTrackCreated: result.created,
