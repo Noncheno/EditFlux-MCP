@@ -725,6 +725,21 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    // 既に同じポートでサーバーが動いている(多くは古いコードのまま残っているプロセス)。
+    // 黙って落ちると「起動ボタンを押しても古い挙動のまま」という分かりにくい状態になるため、
+    // はっきり分かるメッセージを残して終了する。利用者には既存プロセスの停止 or Premiere再起動を促す。
+    console.error(
+      `[EditFlux] ポート${PORT}は既に使用中です。古いautomation-serverプロセスが残っている可能性があります。` +
+      `Premiere Proを完全に終了(Cmd+Q)してから再起動するか、\`lsof -i :${PORT}\`で該当プロセスを確認して終了してください。`
+    );
+    process.exit(1);
+  }
+  console.error('[EditFlux] サーバーエラー:', err);
+  process.exit(1);
+});
+
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`[EditFlux] automation-server listening on http://127.0.0.1:${PORT}`);
   console.log(`[EditFlux] bridge temp dir: ${TEMP_DIR}`);

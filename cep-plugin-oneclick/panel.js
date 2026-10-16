@@ -97,9 +97,16 @@
         }
     }
 
-    window.startServer = function () {
+    window.startServer = async function () {
         if (!fs.existsSync(SERVER_SCRIPT)) {
             log('automation-server/server.js が見つかりません: ' + SERVER_SCRIPT, 'error');
+            return;
+        }
+        // 既に(別プロセスとして)起動済みなら二重起動しない。ポート競合で新しい方が
+        // 黙って落ち、「ボタンを押したのにコードが更新されない」状態になるのを防ぐ。
+        var alreadyRunning = await checkHealth();
+        if (alreadyRunning) {
+            log('自動化サーバーは既に起動中です。コードを更新した後は、一度ターミナルで `lsof -i :4747` 等で古いプロセスを終了するか、Premiereを再起動してから押し直してください。', 'info');
             return;
         }
         log('自動化サーバーを起動しています…', 'info');
