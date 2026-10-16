@@ -381,13 +381,35 @@ function scriptInsertMediaAtPlayhead(filePath, trackIndex) {
 
 // ───────────────────────── ffmpeg / whisper ─────────────────────────
 
+// Premiere(GUIアプリ)経由で起動されるとPATHが最小構成(/usr/bin:/bin等)になり、
+// Homebrewでインストールしたffmpeg/python3が見つからないことが多い。
+// よくあるインストール先を直接探し、見つかればフルパスを使う。
+const BINARY_SEARCH_PATHS = {
+  ffmpeg: ['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg'],
+  python3: ['/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3']
+};
+const _resolvedBinaryCache = {};
+function resolveBinary(name) {
+  if (_resolvedBinaryCache[name]) return _resolvedBinaryCache[name];
+  const candidates = BINARY_SEARCH_PATHS[name] || [];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      _resolvedBinaryCache[name] = candidate;
+      return candidate;
+    }
+  }
+  _resolvedBinaryCache[name] = name; // PATHに期待してフォールバック
+  return name;
+}
+
 function runProcess(cmd, args, opts) {
+  const resolvedCmd = resolveBinary(cmd);
   return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, args, opts || {});
+    const proc = spawn(resolvedCmd, args, opts || {});
     let stdout = '', stderr = '';
     proc.stdout && proc.stdout.on('data', (d) => (stdout += d.toString()));
     proc.stderr && proc.stderr.on('data', (d) => (stderr += d.toString()));
-    proc.on('error', (err) => reject(new Error(`${cmd} の起動に失敗: ${err.message}（PATHにインストールされていますか?）`)));
+    proc.on('error', (err) => reject(new Error(`${resolvedCmd} の起動に失敗: ${err.message}（PATHにインストールされていますか?）`)));
     proc.on('close', (code) => resolve({ code, stdout, stderr }));
   });
 }
