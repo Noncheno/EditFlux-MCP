@@ -609,10 +609,20 @@ function resolveBinary(name) {
   return name;
 }
 
+// PremiereのGUI PATHで起動したこのプロセス自身はffmpeg/python3を絶対パスで解決できても、
+// Whisperのように「内部でさらにffmpegをサブプロセスとして呼ぶ」ライブラリには効果がない
+// (呼び出し元のPATH環境変数しか見ないため)。よくあるインストール先を明示的にPATHへ
+// 前置きし、すべての子プロセス(とその孫プロセス)から見つかるようにする。
+const EXTRA_PATH_DIRS = ['/opt/homebrew/bin', '/usr/local/bin'];
+const AUGMENTED_ENV = Object.assign({}, process.env, {
+  PATH: EXTRA_PATH_DIRS.concat((process.env.PATH || '').split(path.delimiter)).join(path.delimiter)
+});
+
 function runProcess(cmd, args, opts) {
   const resolvedCmd = resolveBinary(cmd);
+  const mergedOpts = Object.assign({}, opts, { env: Object.assign({}, AUGMENTED_ENV, opts && opts.env) });
   return new Promise((resolve, reject) => {
-    const proc = spawn(resolvedCmd, args, opts || {});
+    const proc = spawn(resolvedCmd, args, mergedOpts);
     let stdout = '', stderr = '';
     proc.stdout && proc.stdout.on('data', (d) => (stdout += d.toString()));
     proc.stderr && proc.stderr.on('data', (d) => (stderr += d.toString()));
@@ -655,7 +665,8 @@ async function transcribeFile(mediaPath, language, model, outDir) {
     '--model', model || 'small'
   ]);
   if (code !== 0) {
-    throw new Error(`Whisperでの文字起こしに失敗しました: ${stderr || stdout}`);
+    const detail = (stderr || stdout || '').trim();
+    throw new Error(`Whisperでの文字起こしに失敗しました (exit code ${code})${detail ? ': ' + detail : ' (出力なし)'}`);
   }
   const jsonPath = path.join(outDir, 'captions.json');
   if (!fs.existsSync(jsonPath)) throw new Error('captions.jsonが生成されませんでした');
