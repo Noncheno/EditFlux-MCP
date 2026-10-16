@@ -17,7 +17,13 @@ const os = require('os');
 const { spawn } = require('child_process');
 
 const PORT = process.env.EDITFLUX_PORT ? parseInt(process.env.EDITFLUX_PORT, 10) : 4747;
-const TEMP_DIR = process.env.PREMIERE_TEMP_DIR || path.join(os.tmpdir(), 'premiere-mcp-bridge');
+// os.tmpdir()はmacOSでは/var/folders/.../T(ユーザーごとのTMPDIR)を返し、/tmpとは別物。
+// MCP Bridge (CEP)パネル側(bridge-cep.js)はWindows以外では常に素の'/tmp'を既定値として
+// 監視しているため、ここも同じく固定の/tmpを使う(Windowsだけ%TEMP%に従う)。
+const DEFAULT_TEMP_DIR = process.platform === 'win32'
+  ? path.join(process.env.TEMP || process.env.TMP || 'C:\\Temp', 'premiere-mcp-bridge')
+  : '/tmp/premiere-mcp-bridge';
+const TEMP_DIR = process.env.PREMIERE_TEMP_DIR || DEFAULT_TEMP_DIR;
 const POLL_MS = 150;
 const BRIDGE_TIMEOUT_MS = 45000;
 const WORK_DIR = path.join(os.tmpdir(), 'editflux-work');
