@@ -188,9 +188,16 @@
 
         <div class="step-content" data-step="5">
             <button onclick="runInsertBroll()" id="insertBrollBtn">インサート動画を自動挿入</button>
+            <div class="opts" style="align-items:center;">
+                <label style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-1);">
+                    <input type="checkbox" id="brollFullCoverage" checked>
+                    マッチした箇所を全部挿入する(30〜40%ルールを使わない)
+                </label>
+            </div>
             <div class="file-label" style="margin:0 0 10px;">
                 音声の内容を解析し、フォルダ名をタグとみなして合う素材を自動で挟み込む
-                (全体の30〜40%程度、1テイクは文の頭から次の文の頭まで・7秒超は2本に分割)。
+                (1テイクは文の頭から次の文の頭まで・7秒超は2本に分割)。
+                チェックを外すと、編集ガイドライン通り全体の30〜40%程度(マッチ度の高い順)に絞る。
                 Gemini APIキー(automation-server/.envのGEMINI_API_KEY)が設定されていれば
                 そちらで内容判定、無ければキーワード辞書で判定する。
                 新しく追加したビデオトラックに配置される。

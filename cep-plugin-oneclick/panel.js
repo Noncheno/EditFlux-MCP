@@ -155,10 +155,11 @@
 
     window.runInsertBroll = async function () {
         var btn = document.getElementById('insertBrollBtn');
+        var fullCoverage = document.getElementById('brollFullCoverage').checked;
         btn.disabled = true;
         log('インサート動画を解析中… (文字起こし → 内容判定 → 挿入)', 'info');
         try {
-            var result = await fetchJSON('/insert-broll', 'POST', {});
+            var result = await fetchJSON('/insert-broll', 'POST', { fullCoverage: fullCoverage });
             if (result.message) {
                 log(result.message, 'info');
             } else {

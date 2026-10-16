@@ -1645,7 +1645,9 @@ async function geminiMatchTakes(takes, folderNames) {
 // takes(候補)の中からマッチしたものだけを残し、合計尺が動画全体の
 // 30〜40%(目安35%)に収まるよう、マッチ度の高い順に採用していく。
 // Gemini APIキーがあればそちらを優先し、無ければ/失敗すればキーワード辞書方式を使う。
-async function buildBrollPlan(rawCaptions, totalDurationSec) {
+async function buildBrollPlan(rawCaptions, totalDurationSec, opts) {
+  opts = opts || {};
+  const fullCoverage = !!opts.fullCoverage;
   const existingFolders = new Set(
     listBrollFolders().filter((f) => listBrollFiles(f).length > 0)
   );
@@ -1679,15 +1681,24 @@ async function buildBrollPlan(rawCaptions, totalDurationSec) {
   });
   candidates.sort((a, b) => b.score - a.score || b.duration - a.duration);
 
-  const targetDuration = totalDurationSec * 0.35;
-  const maxDuration = totalDurationSec * 0.4;
-  const selected = [];
-  let usedDuration = 0;
-  for (const c of candidates) {
-    if (usedDuration + c.duration > maxDuration) continue;
-    selected.push(c);
-    usedDuration += c.duration;
-    if (usedDuration >= targetDuration) break;
+  // fullCoverage: マッチした箇所を全部採用する(30〜40%ルールを使わない)。
+  // 既定(false)は編集ガイドライン通り、動画全体の30〜40%(目安35%)に収める。
+  let selected;
+  let usedDuration;
+  if (fullCoverage) {
+    selected = candidates;
+    usedDuration = candidates.reduce((sum, c) => sum + c.duration, 0);
+  } else {
+    const targetDuration = totalDurationSec * 0.35;
+    const maxDuration = totalDurationSec * 0.4;
+    selected = [];
+    usedDuration = 0;
+    for (const c of candidates) {
+      if (usedDuration + c.duration > maxDuration) continue;
+      selected.push(c);
+      usedDuration += c.duration;
+      if (usedDuration >= targetDuration) break;
+    }
   }
   selected.sort((a, b) => a.start - b.start);
 
@@ -1816,7 +1827,7 @@ async function workflowInsertBroll(opts) {
   rawCaptions.sort((a, b) => a.start - b.start);
 
   const totalDurationSec = info.durationSec || rawCaptions[rawCaptions.length - 1].end;
-  const { plan, coverageRatio, matchSource, geminiError } = await buildBrollPlan(rawCaptions, totalDurationSec);
+  const { plan, coverageRatio, matchSource, geminiError } = await buildBrollPlan(rawCaptions, totalDurationSec, { fullCoverage: !!opts.fullCoverage });
   if (plan.length === 0) {
     return { success: true, message: '合致する箇所が見つかりませんでした。素材フォルダか判定方法を見直してください。', sequenceName: info.name, inserted: 0, matchSource, geminiError };
   }
