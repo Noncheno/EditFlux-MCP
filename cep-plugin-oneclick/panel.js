@@ -71,32 +71,11 @@
         return data;
     }
 
-    var telopPresetsLoaded = false;
-    async function loadTelopPresets() {
-        var grid = document.getElementById('styleGrid');
-        try {
-            var data = await fetchJSON('/telop-presets', 'GET');
-            var presets = data.presets || [];
-            if (presets.length === 0) {
-                grid.innerHTML = '<div class="style-empty">まだ登録がありません。ONECLICK.md参照。</div>';
-                return;
-            }
-            grid.innerHTML = presets.map(function (p) {
-                return '<div class="style-tile"><img src="' + BASE + p.thumbUrl + '" alt="' + p.label + '">' +
-                    '<div class="style-label">' + p.label + '</div></div>';
-            }).join('');
-            telopPresetsLoaded = true;
-        } catch (e) {
-            grid.innerHTML = '<div class="style-empty">取得に失敗しました</div>';
-        }
-    }
-
     async function checkHealth() {
         try {
             var data = await fetchJSON('/health', 'GET');
             setDot('serverDot', true);
             document.getElementById('serverText').textContent = '自動化サーバー: 起動中';
-            if (!telopPresetsLoaded) loadTelopPresets();
             if (data.bridgeConnected) {
                 setDot('bridgeDot', true);
                 document.getElementById('bridgeText').textContent =
