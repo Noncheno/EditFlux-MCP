@@ -233,8 +233,9 @@ function scriptApplyJumpCuts(silenceRanges) {
       }
       cuts.sort(function(a, b) { return a - b; });
 
+      try { app.enableQE(); } catch (eQE) {}
       var qeSeq = null;
-      try { qeSeq = qe.project.getActiveSequence(); } catch (_) {}
+      try { qeSeq = qe.getProject().getActiveSequence(); } catch (_) {}
       var razored = 0, razorErrors = 0;
       if (qeSeq) {
         for (var i = 0; i < cuts.length; i++) {
@@ -528,18 +529,10 @@ async function workflowJumpCut(opts) {
   const mergeGapSec = opts.mergeGapSec != null ? opts.mergeGapSec : 0.15;
 
   const info = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO);
-  const audioTrack0 = (info.audio && info.audio[0] && info.audio[0].clips) || [];
-  if (audioTrack0.length === 0) {
+  const clips = (info.audio && info.audio[0] && info.audio[0].clips) || [];
+  if (clips.length === 0) {
     throw new Error('オーディオトラック0(A1)にクリップがありません。無音検出の対象がありません。');
   }
-
-  const dup = await evalJSON(scriptDuplicateAndActivate(`${info.name} - Jump Cuts`));
-  if (!dup.activated) {
-    throw new Error('シーケンスの複製には成功しましたが、複製側へ切り替えられませんでした。Premiere上で手動でタブを切り替えてから再実行してください。');
-  }
-
-  const dupInfo = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO);
-  const clips = (dupInfo.audio && dupInfo.audio[0] && dupInfo.audio[0].clips) || [];
 
   const paths = uniqueMediaPaths(clips);
   if (paths.length === 0) throw new Error('A1クリップのメディアパスを取得できませんでした。');
@@ -561,7 +554,7 @@ async function workflowJumpCut(opts) {
     return {
       success: true,
       message: '無音区間が見つかりませんでした(しきい値を調整すると検出できる場合があります)。',
-      sequenceName: dupInfo.name,
+      sequenceName: info.name,
       cuts: 0
     };
   }
@@ -571,7 +564,7 @@ async function workflowJumpCut(opts) {
 
   return {
     success: true,
-    sequenceName: dupInfo.name,
+    sequenceName: info.name,
     preset: opts.preset || null,
     minDurationSec: minDurSec,
     residualSec: residualSec,
