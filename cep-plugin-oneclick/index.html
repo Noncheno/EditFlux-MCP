@@ -174,55 +174,10 @@
         </div>
 
         <div class="step-content" data-step="2">
-            <div class="file-label" style="margin:0 0 10px; padding:8px; border:1px solid var(--panel-border); border-radius:8px;">
-                <b>おすすめの手順(書き出し不要・コピペのみ):</b><br>
-                ① Premiereの「文字起こし」で書き起こし、聞きながらその場で誤字を直す<br>
-                ② Text(テキスト)パネルの文字を全選択してコピー(ファイル保存は不要)<br>
-                ③ 下の「シナリオ」欄に貼り付け<br>
-                ④ 下の「テロップを生成」ボタンを押す(Whisperはタイミング取得にのみ使い、
-                表示される文字は②で直した正しいテキストの方を使うので脱字の心配なし)
+            <div class="file-label" style="margin:0 0 10px;">
+                テロップ生成はPremiereの「文字起こし」機能を直接使う運用に変更した
+                (このパネルからの自動生成ボタンは一旦削除)。
             </div>
-            <button class="secondary" onclick="runTelopRefine()" id="telopRefineBtn">
-                Premiereの文字起こしを自動読み取り(実験的・失敗することがあります)
-            </button>
-            <div class="file-label" style="margin:-4px 0 10px;">
-                上のおすすめ手順を使わず、コピペもせずに自動で読み取れないか試す(Premiereに
-                キャプションを読む公式機能が無いため、環境によっては失敗する)。
-            </div>
-            <button onclick="runTelop()" id="telopBtn">テロップを生成(Whisper)</button>
-            <div class="opts">
-                <select id="whisperModel">
-                    <option value="small" selected>精度: 標準(small)</option>
-                    <option value="medium">精度: 高(medium・遅い)</option>
-                    <option value="large-v3">精度: 最高(large-v3・かなり遅い)</option>
-                </select>
-                <select id="telopMaxChars">
-                    <option value="8">1行8文字(縦型・狭い動画向け)</option>
-                    <option value="10">1行10文字</option>
-                    <option value="12" selected>1行12文字</option>
-                    <option value="14">1行14文字</option>
-                    <option value="16">1行16文字(横長動画向け)</option>
-                </select>
-            </div>
-            <div class="file-label" style="margin:0 0 8px;">
-                実際に何文字で折り返せるかは動画の解像度・キャプションのフォントサイズで変わる。
-                生成後に3行以上になってしまう場合は、文字数を減らしてもう一度試してほしい。
-            </div>
-            <div class="file-label" style="margin:10px 0 4px;">
-                シナリオ(台本)がある場合はここに貼り付けると、Whisperの認識テキストの代わりに
-                この本文を音声のタイミングに合わせて配置します(脱字・誤認識対策)。空欄ならWhisperの認識結果をそのまま使います。
-                貼り付けた内容はWhisperの認識精度を上げるヒントとしても使われるので、台本が無くても
-                固有名詞や専門用語だけ書いておくだけでも誤字が減りやすい。精度を上げたい場合は上の
-                モデルを「medium」や「large-v3」に変えるのも有効(その分時間がかかる)。<br><br>
-                <b>1枚ずつ空行で区切って書くと</b>、その中の改行・表記(句読点・数字等)をそのまま使い、
-                自動改行や句読点除去を一切しない(文節の途中で割れるのを防ぐため)。例:<br>
-                <code style="white-space:pre; display:block; margin-top:4px; opacity:0.85;">55歳で
-相続放棄しました
-
-1,000万円の
-借金がありました</code>
-            </div>
-            <textarea id="telopScript" placeholder="(任意) シナリオ本文を貼り付け" style="width:100%; min-height:70px; resize:vertical; background:rgba(9,17,25,0.72); color:var(--text-0); border:1px solid var(--panel-border); border-radius:8px; padding:6px; font-size:11px; margin-bottom:8px;"></textarea>
             <div class="file-label" style="margin:10px 0;">
                 デザインを当てる場合は、生成後にPremiereでキャプショントラックを選択し
                 「キャプションをグラフィックに変換」を実行、下の一覧から好きなスタイルを選んでください
