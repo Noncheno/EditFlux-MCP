@@ -478,12 +478,25 @@ function uniqueMediaPaths(clips) {
   return Array.from(set);
 }
 
+// ジャンプカットの3プリセット。
+// minDurationSec: これ以上長い無音だけをカット対象にする(ffmpegのsilencedetect d=)
+// residualSec: カット後にその無音区間から残す長さ(自然さ優先か、テンポ優先かの差)
+const JUMP_CUT_PRESETS = {
+  interview: { label: 'インタビュー・対談動画', minDurationSec: 0.5, residualSec: 0.2 },
+  presentation: { label: 'プレゼンテーション・解説動画', minDurationSec: 0.3, residualSec: 0.1 },
+  vlog: { label: 'Vlog・日常系動画', minDurationSec: 1.0, residualSec: 0.3 }
+};
+
 // ───────────────────────── ワークフロー ─────────────────────────
 
 async function workflowJumpCut(opts) {
+  const preset = opts.preset && JUMP_CUT_PRESETS[opts.preset] ? JUMP_CUT_PRESETS[opts.preset] : null;
   const thresholdDb = opts.thresholdDb != null ? opts.thresholdDb : -35;
-  const minDurSec = opts.minDurationSec != null ? opts.minDurationSec : 0.4;
-  const handleSec = opts.handleSec != null ? opts.handleSec : 0.07;
+  const minDurSec = opts.minDurationSec != null ? opts.minDurationSec : (preset ? preset.minDurationSec : 0.4);
+  // 無音区間のうち、カットせず残す長さ(末尾側)。呼吸や次の発話前のタメを完全には消さない。
+  const residualSec = opts.residualSec != null ? opts.residualSec : (preset ? preset.residualSec : 0.1);
+  // 無音の先頭側に残す極小ハンドル。直前の発話の尻を切らないための保険(残す長さには含めない)。
+  const leadHandleSec = opts.leadHandleSec != null ? opts.leadHandleSec : 0.03;
   const mergeGapSec = opts.mergeGapSec != null ? opts.mergeGapSec : 0.15;
 
   const info = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO);
@@ -509,9 +522,10 @@ async function workflowJumpCut(opts) {
   }
 
   let timelineSilences = mapIntervalsToTimeline(clips, intervalsByPath);
-  // ハンドル分だけ内側に縮める(発話の頭・尻を切らないため)
+  // 無音区間の末尾側に residualSec を残し、先頭側は leadHandleSec だけ避けてカットする。
+  // 例: 0.5秒以上の無音を検出し、0.2秒だけ残す → カットするのは [start+0.03, end-0.2] の区間。
   timelineSilences = timelineSilences
-    .map((iv) => ({ start: iv.start + handleSec, end: iv.end - handleSec }))
+    .map((iv) => ({ start: iv.start + leadHandleSec, end: iv.end - residualSec }))
     .filter((iv) => iv.end > iv.start);
   timelineSilences = mergeNearbyIntervals(timelineSilences, mergeGapSec);
 
@@ -530,6 +544,9 @@ async function workflowJumpCut(opts) {
   return {
     success: true,
     sequenceName: dupInfo.name,
+    preset: opts.preset || null,
+    minDurationSec: minDurSec,
+    residualSec: residualSec,
     cuts: timelineSilences.length,
     deletedVideoClips: result.deletedVideo,
     deletedAudioClips: result.deletedAudio,

@@ -103,10 +103,10 @@
     <section class="panel">
         <button onclick="runJumpCut()" id="jumpCutBtn">ジャンプカットを実行</button>
         <div class="opts">
-            <select id="silenceThreshold">
-                <option value="-30">無音判定: 甘め(-30dB)</option>
-                <option value="-35" selected>無音判定: 標準(-35dB)</option>
-                <option value="-40">無音判定: 厳しめ(-40dB)</option>
+            <select id="jumpCutPreset">
+                <option value="interview" selected>インタビュー・対談動画(0.5秒以上→0.2秒残す)</option>
+                <option value="presentation">プレゼン・解説動画(0.3秒以上→0.1秒に短縮)</option>
+                <option value="vlog">Vlog・日常系動画(1.0秒以上→0.3秒に詰める)</option>
             </select>
         </div>
 

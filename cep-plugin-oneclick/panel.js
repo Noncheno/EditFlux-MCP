@@ -126,11 +126,11 @@
 
     window.runJumpCut = async function () {
         var btn = document.getElementById('jumpCutBtn');
-        var threshold = parseInt(document.getElementById('silenceThreshold').value, 10);
+        var preset = document.getElementById('jumpCutPreset').value;
         btn.disabled = true;
         log('ジャンプカットを実行中… (無音検出 → カット適用)', 'info');
         try {
-            var result = await fetchJSON('/jump-cut', 'POST', { thresholdDb: threshold });
+            var result = await fetchJSON('/jump-cut', 'POST', { preset: preset });
             log(
                 'ジャンプカット完了: "' + result.sequenceName + '" / カット数 ' + result.cuts +
                 ' / 削除クリップ 映像' + (result.deletedVideoClips || 0) + '・音声' + (result.deletedAudioClips || 0),
