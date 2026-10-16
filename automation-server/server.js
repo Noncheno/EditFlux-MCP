@@ -321,7 +321,7 @@ function scriptApplyJumpCuts(silenceRanges) {
         for (var ci = track.clips.numItems - 1; ci >= 0; ci--) {
           var clip = track.clips[ci];
           if (isSilent(clip.start.seconds, clip.end.seconds)) {
-            try { clip.remove(false, true); delV++; } catch (_) {}
+            try { clip.remove(true, true); delV++; } catch (_) {}
           }
         }
       }
@@ -330,7 +330,7 @@ function scriptApplyJumpCuts(silenceRanges) {
         for (var ci = track.clips.numItems - 1; ci >= 0; ci--) {
           var clip = track.clips[ci];
           if (isSilent(clip.start.seconds, clip.end.seconds)) {
-            try { clip.remove(false, true); delA++; } catch (_) {}
+            try { clip.remove(true, true); delA++; } catch (_) {}
           }
         }
       }
