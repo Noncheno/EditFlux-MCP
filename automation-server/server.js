@@ -101,6 +101,57 @@ async function evalJSON(script, timeoutMs) {
 
 function esc(value) { return JSON.stringify(String(value)); }
 
+// QEシーケンス/トラックの取得は、見つかったように見えて実は違うシーケンス/トラックを
+// 掴んでいることがある(qe.project.getActiveSequence()がDOM側のactiveSequenceと
+// 食い違う等)、既知の難所。ここはadobe-premiere-pro-mcp本家(src/bridge/index.ts)が
+// 実機(Premiere 26.0.2)で検証済みのロジックをそのまま流用する。
+const QE_HELPERS = `
+function __qeSequenceLookup(seq) {
+  if (!seq) return null;
+  var count = 0;
+  try { count = qe.project.numSequences; } catch (eCount) { return null; }
+  for (var qi = 0; qi < count; qi++) {
+    try {
+      var candidate = qe.project.getSequenceAt(qi);
+      if (candidate && String(candidate.guid) === String(seq.sequenceID)) return candidate;
+    } catch (eAt) {}
+  }
+  try {
+    var activeCandidate = qe.project.getActiveSequence();
+    if (activeCandidate && String(activeCandidate.guid) === String(seq.sequenceID)) return activeCandidate;
+  } catch (eActive) {}
+  return null;
+}
+function __activateSequenceForQE(seq) {
+  if (!seq) return;
+  try {
+    if (typeof app.project.openSequence === "function") app.project.openSequence(seq.sequenceID);
+  } catch (eOpen) {}
+  try { app.project.activeSequence = seq; } catch (eSet) {}
+  try { if (seq.openInTimeline) seq.openInTimeline(); } catch (eTL) {}
+  try { if (typeof $ !== "undefined" && $.sleep) $.sleep(250); } catch (eSleep) {}
+}
+function __qeSequenceFor(seq) {
+  if (!seq) return null;
+  try { app.enableQE(); } catch (eEnable) { return null; }
+  var found = __qeSequenceLookup(seq);
+  if (found) return found;
+  __activateSequenceForQE(seq);
+  try { app.enableQE(); } catch (eEnable2) {}
+  return __qeSequenceLookup(seq);
+}
+function __secondsToTimecode(seq, seconds) {
+  var fps = seq.timebase ? (254016000000 / parseInt(seq.timebase, 10)) : 30;
+  var totalFrames = Math.round(seconds * fps);
+  var hours = Math.floor(totalFrames / (fps * 3600));
+  var mins = Math.floor((totalFrames % (fps * 3600)) / (fps * 60));
+  var secs = Math.floor((totalFrames % (fps * 60)) / fps);
+  var frames = Math.round(totalFrames % fps);
+  function pad(n) { return n < 10 ? "0" + n : "" + n; }
+  return pad(hours) + ":" + pad(mins) + ":" + pad(secs) + ":" + pad(frames);
+}
+`;
+
 const SCRIPT_GET_ACTIVE_SEQ_INFO = `(function(){
   try {
     var seq = app.project.activeSequence;
@@ -186,7 +237,8 @@ const SCRIPT_SAVE = `(function(){
 
 function scriptApplyJumpCuts(silenceRanges) {
   const silencesJSON = JSON.stringify(silenceRanges);
-  return `(function(){
+  return `${QE_HELPERS}
+  (function(){
     try {
       var silences = ${silencesJSON};
       var seq = app.project.activeSequence;
@@ -233,17 +285,26 @@ function scriptApplyJumpCuts(silenceRanges) {
       }
       cuts.sort(function(a, b) { return a - b; });
 
-      try { app.enableQE(); } catch (eQE) {}
-      var qeSeq = null;
-      try { qeSeq = qe.getProject().getActiveSequence(); } catch (_) {}
+      var qeSeq = __qeSequenceFor(seq);
       var razored = 0, razorErrors = 0;
       if (qeSeq) {
         for (var i = 0; i < cuts.length; i++) {
-          var ticks = String(Math.round(cuts[i] * tps));
-          try { qeSeq.razor(ticks); razored++; } catch (e2) { razorErrors++; }
+          var tc = __secondsToTimecode(seq, cuts[i]);
+          for (var vti = 0; vti < seq.videoTracks.numTracks; vti++) {
+            try {
+              var qeVTrack = qeSeq.getVideoTrackAt(vti);
+              if (qeVTrack) { qeVTrack.razor(tc); razored++; }
+            } catch (e2) { razorErrors++; }
+          }
+          for (var ati = 0; ati < seq.audioTracks.numTracks; ati++) {
+            try {
+              var qeATrack = qeSeq.getAudioTrackAt(ati);
+              if (qeATrack) { qeATrack.razor(tc); razored++; }
+            } catch (e3) { razorErrors++; }
+          }
         }
       } else {
-        return JSON.stringify({ success: false, error: 'qe DOMが利用できません(app.enableQE()が必要)' });
+        return JSON.stringify({ success: false, error: 'QEシーケンスを取得できませんでした(app.enableQEが使えない環境の可能性)' });
       }
 
       function isSilent(startSec, endSec) {
