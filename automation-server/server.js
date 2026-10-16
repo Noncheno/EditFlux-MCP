@@ -1741,6 +1741,18 @@ function scriptInsertBrollPlan(plan) {
       var trackIdx = seq.videoTracks.numTracks > beforeTracks ? seq.videoTracks.numTracks - 1 : beforeTracks - 1;
       var track = seq.videoTracks[trackIdx];
 
+      // インサート素材は、プロジェクトパネルの「素材」ビンにまとめてインポートする
+      // (ユーザーが毎回のプロジェクトで作っているビン名。無ければ作成する)。
+      var materialBin = null;
+      for (var bi = 0; bi < app.project.rootItem.children.numItems; bi++) {
+        var child = app.project.rootItem.children[bi];
+        if (child.type === ProjectItemType.BIN && child.name === '素材') { materialBin = child; break; }
+      }
+      if (!materialBin) {
+        try { materialBin = app.project.rootItem.createBin('素材'); } catch (eBin) {}
+      }
+      var importTarget = materialBin || app.project.rootItem;
+
       function walk(parent, out) {
         for (var i = 0; i < parent.children.numItems; i++) {
           var c = parent.children[i];
@@ -1759,7 +1771,7 @@ function scriptInsertBrollPlan(plan) {
           var projItem = itemCache[it.filePath];
           if (!projItem) {
             var before = []; walk(app.project.rootItem, before);
-            var ok = app.project.importFiles([it.filePath], true, app.project.rootItem, false);
+            var ok = app.project.importFiles([it.filePath], true, importTarget, false);
             if (!ok) { errors.push(it.filePath + ': インポート失敗'); continue; }
             var after = []; walk(app.project.rootItem, after);
             for (var i = 0; i < after.length; i++) {
