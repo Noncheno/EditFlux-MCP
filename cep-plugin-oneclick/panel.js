@@ -71,11 +71,31 @@
         return data;
     }
 
+    var telopPresetsLoaded = false;
+    async function loadTelopPresets() {
+        var select = document.getElementById('telopPreset');
+        try {
+            var data = await fetchJSON('/telop-presets', 'GET');
+            var presets = data.presets || [];
+            if (presets.length === 0) {
+                select.innerHTML = '<option value="">(未登録 — ONECLICK.md参照)</option>';
+                return;
+            }
+            select.innerHTML = presets.map(function (p) {
+                return '<option value="' + p.key + '">' + p.label + '</option>';
+            }).join('');
+            telopPresetsLoaded = true;
+        } catch (e) {
+            select.innerHTML = '<option value="">(取得失敗)</option>';
+        }
+    }
+
     async function checkHealth() {
         try {
             var data = await fetchJSON('/health', 'GET');
             setDot('serverDot', true);
             document.getElementById('serverText').textContent = '自動化サーバー: 起動中';
+            if (!telopPresetsLoaded) loadTelopPresets();
             if (data.bridgeConnected) {
                 setDot('bridgeDot', true);
                 document.getElementById('bridgeText').textContent =

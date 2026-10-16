@@ -75,18 +75,17 @@ APIを直接叩く場合は `{ "preset": "interview" }` のように指定する
 
 ### テロップのフォントプリセット
 
-Premiereには「文字からタイトルを作る」API自体が無いため、.mogrt(モーショングラフィックステンプレート)に文字を流し込む方式でテロップを作る。`automation-server/server.js` の `TELOP_PRESETS` で、プリセット名 → .mogrtファイルパスを定義している。
+Premiereには「文字からタイトルを作る」API自体が無いため、.mogrt(モーショングラフィックステンプレート)に文字を流し込む方式でテロップを作る。プリセットは**コード編集不要**で、専用フォルダに.mogrtを保存するだけでパネルのドロップダウンに自動で増える:
+
+```
+~/Library/Application Support/Adobe/Common/Motion Graphics Templates/EditFlux Telop/
+```
 
 **プリセットを増やす手順**(Premiere上の一度きりの手作業):
 1. 文字ツールでシーケンス上に仮の文字を1つ作る(1レイヤーのみ、装飾なし)
 2. エッセンシャルグラフィックスパネルの「マイスタイル」から使いたいスタイルを適用
-3. パネルのメニューから「モーショングラフィックステンプレートとして書き出し」を選び、分かりやすい名前で保存(既定の保存先は `~/Library/Application Support/Adobe/Common/Motion Graphics Templates/`)
-4. `TELOP_PRESETS` にエントリを追加:
-   ```js
-   style2: { label: 'わかりやすい名前', mogrtPath: '/Users/.../Motion Graphics Templates/xxx.mogrt' }
-   ```
-5. `cep-plugin-oneclick/index.html` の `#telopPreset` セレクトに `<option value="style2">わかりやすい名前</option>` を追加
-6. `scripts/install-oneclick-panel-macos.sh` を再実行
+3. パネルのメニューから「モーショングラフィックステンプレートとして書き出し」を選び、保存先を上記の `EditFlux Telop` フォルダにする。ファイル名がそのままパネルの選択肢名になるので、分かりやすい名前で保存する
+4. `EditFlux ワンクリック編集` パネルを開き直す(または再度「自動化サーバーを起動」)と、ドロップダウンに増えている
 
 テロップは**1行最大16文字・最大2行(合計32文字)**に収まるよう自動で折り返す。収まらない場合は、文字数に応じて尺を分け合う複数カードに分割する(内容を削らない)。句読点(。、！？)はテロップ本文から自動的に除去する。
 

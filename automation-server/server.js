@@ -854,16 +854,37 @@ const JUMP_CUT_PRESETS = {
   vlog: { label: 'Vlog・日常系動画', minDurationSec: 1.0, residualSec: 0.3 }
 };
 
-// テロップ用フォントプリセット。Premiereのエッセンシャルグラフィックスパネルで
-// 1つの文字レイヤーに「マイスタイル」を適用 → .mogrtとして書き出す、を繰り返して増やす
-// (ONECLICK.md参照)。キーはパネルのプリセット選択に使う識別子。
-const TELOP_PRESETS = {
-  style1: {
-    label: '白地+紺枠',
-    mogrtPath: '/Users/katagirinozomi/Library/Application Support/Adobe/Common/Motion Graphics Templates/白地+紺枠.mogrt'
+// テロップ用フォントプリセットは、このフォルダに保存した.mogrtファイルを自動的に一覧化する。
+// Premiereのエッセンシャルグラフィックスパネルで文字レイヤーに「マイスタイル」を適用して
+// 書き出すとき、保存先をこのフォルダにするだけで(コードの変更なしに)パネルの選択肢に増える。
+const TELOP_PRESETS_DIR = path.join(
+  os.homedir(),
+  'Library/Application Support/Adobe/Common/Motion Graphics Templates/EditFlux Telop'
+);
+ensureDir(TELOP_PRESETS_DIR);
+
+function listTelopPresets() {
+  let files = [];
+  try {
+    files = fs.readdirSync(TELOP_PRESETS_DIR).filter((f) => f.toLowerCase().endsWith('.mogrt'));
+  } catch (_) {}
+  return files.map((f) => {
+    const label = f.replace(/\.mogrt$/i, '');
+    return { key: label, label: label, mogrtPath: path.join(TELOP_PRESETS_DIR, f) };
+  }).sort((a, b) => a.label.localeCompare(b.label, 'ja'));
+}
+
+function resolveTelopPreset(presetKey) {
+  const presets = listTelopPresets();
+  if (presets.length === 0) {
+    throw new Error(
+      `テロップ用の.mogrtが見つかりません。"${TELOP_PRESETS_DIR}" にエッセンシャルグラフィックスから書き出した.mogrtを保存してください。`
+    );
   }
-};
-const DEFAULT_TELOP_PRESET = 'style1';
+  const found = presetKey ? presets.find((p) => p.key === presetKey) : null;
+  return found || presets[0];
+}
+
 const TELOP_MAX_CHARS_PER_LINE = 16;
 const TELOP_MAX_LINES = 2;
 
@@ -1006,12 +1027,8 @@ function writeSrt(captions, outPath) {
 async function workflowTelop(opts) {
   const language = opts.language || 'ja';
   const model = opts.model || 'small';
-  const presetKey = opts.preset && TELOP_PRESETS[opts.preset] ? opts.preset : DEFAULT_TELOP_PRESET;
-  const preset = TELOP_PRESETS[presetKey];
-  if (!preset) throw new Error(`テロップのフォントプリセット "${presetKey}" が見つかりません。`);
-  if (!fs.existsSync(preset.mogrtPath)) {
-    throw new Error(`MOGRTファイルが見つかりません: ${preset.mogrtPath}`);
-  }
+  const preset = resolveTelopPreset(opts.preset);
+  const presetKey = preset.key;
 
   const info = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO);
   const clips = (info.audio && info.audio[0] && info.audio[0].clips) || [];
@@ -1136,7 +1153,8 @@ const ROUTES = {
   '/health': { method: 'GET', handler: async () => ({ ok: true, ...(await checkHealth()) }) },
   '/jump-cut': { method: 'POST', handler: (body) => workflowJumpCut(body || {}) },
   '/telop': { method: 'POST', handler: (body) => workflowTelop(body || {}) },
-  '/insert-media': { method: 'POST', handler: (body) => workflowInsertMedia(body || {}) }
+  '/insert-media': { method: 'POST', handler: (body) => workflowInsertMedia(body || {}) },
+  '/telop-presets': { method: 'GET', handler: async () => ({ presets: listTelopPresets(), dir: TELOP_PRESETS_DIR }) }
 };
 
 const server = http.createServer(async (req, res) => {
