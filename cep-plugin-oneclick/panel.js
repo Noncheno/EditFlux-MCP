@@ -73,20 +73,21 @@
 
     var telopPresetsLoaded = false;
     async function loadTelopPresets() {
-        var select = document.getElementById('telopPreset');
+        var grid = document.getElementById('styleGrid');
         try {
             var data = await fetchJSON('/telop-presets', 'GET');
             var presets = data.presets || [];
             if (presets.length === 0) {
-                select.innerHTML = '<option value="">(未登録 — ONECLICK.md参照)</option>';
+                grid.innerHTML = '<div class="style-empty">まだ登録がありません。ONECLICK.md参照。</div>';
                 return;
             }
-            select.innerHTML = presets.map(function (p) {
-                return '<option value="' + p.key + '">' + p.label + '</option>';
+            grid.innerHTML = presets.map(function (p) {
+                return '<div class="style-tile"><img src="' + BASE + p.thumbUrl + '" alt="' + p.label + '">' +
+                    '<div class="style-label">' + p.label + '</div></div>';
             }).join('');
             telopPresetsLoaded = true;
         } catch (e) {
-            select.innerHTML = '<option value="">(取得失敗)</option>';
+            grid.innerHTML = '<div class="style-empty">取得に失敗しました</div>';
         }
     }
 
@@ -176,16 +177,14 @@
     window.runTelop = async function () {
         var btn = document.getElementById('telopBtn');
         var model = document.getElementById('whisperModel').value;
-        var preset = document.getElementById('telopPreset').value;
         btn.disabled = true;
         log('テロップを生成中… (文字起こしには数分かかる場合があります)', 'info');
         try {
-            var result = await fetchJSON('/telop', 'POST', { model: model, language: 'ja', preset: preset });
-            var failNote = result.failed > 0 ? (' / 失敗 ' + result.failed + '件: ' + (result.failureSample || []).join(' / ')) : '';
+            var result = await fetchJSON('/telop', 'POST', { model: model, language: 'ja' });
             log(
-                'テロップ生成完了: "' + result.sequenceName + '" / スタイル: ' + (result.presetLabel || preset) +
-                ' / カード数 ' + result.cards + ' / 配置成功 ' + result.placed + failNote,
-                result.failed > 0 ? 'error' : 'ok'
+                'テロップ生成完了: "' + result.sequenceName + '" / キャプション数 ' + result.captions +
+                (result.note ? ' / ' + result.note : ''),
+                'ok'
             );
         } catch (e) {
             log('テロップ生成失敗: ' + e.message, 'error');

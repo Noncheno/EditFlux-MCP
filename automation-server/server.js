@@ -870,8 +870,37 @@ function listTelopPresets() {
   } catch (_) {}
   return files.map((f) => {
     const label = f.replace(/\.mogrt$/i, '');
-    return { key: label, label: label, mogrtPath: path.join(TELOP_PRESETS_DIR, f) };
+    return {
+      key: label,
+      label: label,
+      mogrtPath: path.join(TELOP_PRESETS_DIR, f),
+      thumbUrl: '/telop-presets/thumb?key=' + encodeURIComponent(label)
+    };
   }).sort((a, b) => a.label.localeCompare(b.label, 'ja'));
+}
+
+// .mogrtファイルはZIPアーカイブで、Premiereのエッセンシャルグラフィックスが表示している
+// のと同じプレビュー画像が thumb.png として同梱されている。unzip -p でそのまま取り出し、
+// WORK_DIR内にキャッシュする(.mogrt自体が更新されたら再抽出)。
+const THUMB_CACHE_DIR = ensureDir(path.join(WORK_DIR, 'telop-thumb-cache'));
+async function extractThumbnail(mogrtPath) {
+  const cacheKey = Buffer.from(mogrtPath).toString('hex').slice(0, 40) + '.png';
+  const cachePath = path.join(THUMB_CACHE_DIR, cacheKey);
+  const mogrtStat = fs.statSync(mogrtPath);
+  if (fs.existsSync(cachePath)) {
+    const cacheStat = fs.statSync(cachePath);
+    if (cacheStat.mtimeMs >= mogrtStat.mtimeMs) return cachePath;
+  }
+  const { code, stdout } = await new Promise((resolve) => {
+    const proc = spawn(resolveBinary('unzip'), ['-p', mogrtPath, 'thumb.png'], { env: AUGMENTED_ENV });
+    const chunks = [];
+    proc.stdout.on('data', (d) => chunks.push(d));
+    proc.on('close', (c) => resolve({ code: c, stdout: Buffer.concat(chunks) }));
+    proc.on('error', () => resolve({ code: 1, stdout: Buffer.alloc(0) }));
+  });
+  if (code !== 0 || stdout.length === 0) return null;
+  fs.writeFileSync(cachePath, stdout);
+  return cachePath;
 }
 
 function resolveTelopPreset(presetKey) {
@@ -1027,8 +1056,6 @@ function writeSrt(captions, outPath) {
 async function workflowTelop(opts) {
   const language = opts.language || 'ja';
   const model = opts.model || 'small';
-  const preset = resolveTelopPreset(opts.preset);
-  const presetKey = preset.key;
 
   const info = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO);
   const clips = (info.audio && info.audio[0] && info.audio[0].clips) || [];
@@ -1046,19 +1073,17 @@ async function workflowTelop(opts) {
     captionsByPath[p] = await transcribeFile(p, language, model, outDir);
   }
 
-  const timelineCaptions = mapIntervalsToTimeline(clips, captionsByPath, (iv) => ({ text: iv.text }));
-  if (timelineCaptions.length === 0) {
+  const rawCaptions = mapIntervalsToTimeline(clips, captionsByPath, (iv) => ({ text: iv.text }));
+  if (rawCaptions.length === 0) {
     return { success: true, message: '音声から文字を検出できませんでした。', sequenceName: info.name, captions: 0 };
   }
 
-  // 参考用にSRTも残しておく(タイムライン上には適用しない)。
-  const srtPath = path.join(jobDir, 'captions.srt');
-  writeSrt(timelineCaptions, srtPath);
-
+  // キャプショントラックはMOGRTインポートより大幅に軽く、ユーザーが後で手動で
+  // 「キャプションをグラフィックに変換」する前提の軽量出力として使う。
   // 1行16文字・最大2行に収まらないセグメントは、文字数に応じて尺を分け合う
-  // 複数カードに展開する。
-  const cards = [];
-  for (const cap of timelineCaptions) {
+  // 複数キャプションに展開する(句読点は除去)。
+  const timelineCaptions = [];
+  for (const cap of rawCaptions) {
     const text = stripPunctuation(cap.text);
     const wrapped = wrapTelopText(text);
     if (wrapped.length === 0) continue;
@@ -1069,41 +1094,24 @@ async function workflowTelop(opts) {
       const chars = w.text.replace(/\n/g, '').length;
       const share = duration * (chars / totalChars);
       const cardEnd = Math.min(cap.end, cursor + share);
-      cards.push({ text: w.text, start: cursor, end: Math.max(cardEnd, cursor + 0.2) });
+      timelineCaptions.push({ text: w.text, start: cursor, end: Math.max(cardEnd, cursor + 0.2) });
       cursor = cardEnd;
     }
   }
 
-  const addTrackResult = await evalJSON(SCRIPT_ADD_TOP_VIDEO_TRACK);
-  if (addTrackResult.error) throw new Error(`テロップ用トラックの追加に失敗しました: ${addTrackResult.error}`);
-  const trackIndex = addTrackResult.trackIndex;
+  const srtPath = path.join(jobDir, 'captions.srt');
+  writeSrt(timelineCaptions, srtPath);
 
-  let placed = 0, failed = 0;
-  const failures = [];
-  for (const card of cards) {
-    try {
-      const result = await evalJSON(scriptImportMogrtWithText(preset.mogrtPath, trackIndex, card.start, card.end, card.text));
-      if (result.success) placed++;
-      else { failed++; failures.push(result.error); }
-    } catch (e) {
-      failed++;
-      failures.push(e.message);
-    }
-  }
+  const result = await evalJSON(scriptImportAndCreateCaptionTrack(srtPath));
   await evalJSON(SCRIPT_SAVE);
 
   return {
     success: true,
     sequenceName: info.name,
-    preset: presetKey,
-    presetLabel: preset.label,
     captions: timelineCaptions.length,
-    cards: cards.length,
-    placed: placed,
-    failed: failed,
-    failureSample: failures.slice(0, 3),
     srtPath: srtPath,
-    trackIndex: trackIndex
+    captionTrackCreated: result.created,
+    note: '既定のキャプションスタイルで追加されました。必要ならPremiereの「キャプションをグラフィックに変換」でお好みのスタイルに変えてください。'
   };
 }
 
@@ -1160,6 +1168,21 @@ const ROUTES = {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   if (req.method === 'OPTIONS') { sendJSON(res, 204, {}); return; }
+
+  if (url.pathname === '/telop-presets/thumb' && req.method === 'GET') {
+    try {
+      const key = url.searchParams.get('key');
+      const preset = listTelopPresets().find((p) => p.key === key);
+      if (!preset) { sendJSON(res, 404, { error: 'preset not found' }); return; }
+      const thumbPath = await extractThumbnail(preset.mogrtPath);
+      if (!thumbPath) { sendJSON(res, 404, { error: 'thumbnail not found in mogrt' }); return; }
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Access-Control-Allow-Origin': '*' });
+      fs.createReadStream(thumbPath).pipe(res);
+    } catch (e) {
+      sendJSON(res, 500, { error: e.message });
+    }
+    return;
+  }
 
   const route = ROUTES[url.pathname];
   if (!route || route.method !== req.method) {
