@@ -785,15 +785,19 @@ async function detectSilenceInFile(mediaPath, thresholdDb, minDurSec) {
   return intervals;
 }
 
-async function transcribeFile(mediaPath, language, model, outDir) {
+async function transcribeFile(mediaPath, language, model, outDir, initialPrompt) {
   ensureDir(outDir);
-  const { code, stdout, stderr } = await runProcess('python3', [
+  const args = [
     GENERATE_CAPTIONS_PY,
     '--input', mediaPath,
     '--output-dir', outDir,
     '--language', language || 'ja',
     '--model', model || 'small'
-  ]);
+  ];
+  // Whisperのinitial_promptに台本の冒頭を渡すと、固有名詞や専門用語の認識精度が上がりやすい
+  // (トークンに上限があるため、長すぎる場合は冒頭だけを使う)。
+  if (initialPrompt) args.push('--initial-prompt', initialPrompt.slice(0, 400));
+  const { code, stdout, stderr } = await runProcess('python3', args);
   if (code !== 0) {
     const detail = (stderr || stdout || '').trim();
     throw new Error(`Whisperでの文字起こしに失敗しました (exit code ${code})${detail ? ': ' + detail : ' (出力なし)'}`);
@@ -944,7 +948,14 @@ function findBreakPoints(s) {
   return Array.from(points).sort((a, b) => a - b);
 }
 
-// 1行maxCharsPerLine文字・最大2行に収める。収まらない場合は複数のテロップカードに
+// 漢字はひらがな・カタカナより実際の描画幅が広いため、同じ文字数でも漢字が多い行ほど
+// Premiere側で画面幅をはみ出しやすい(「2行で収まる時と3行になる時がある」というブレの主因)。
+// 単純な文字数ではなく、漢字を少し重く数えた「見た目の幅」で折り返し位置を決める。
+function charWeight(ch) {
+  return /[一-鿿㐀-䶿]/.test(ch) ? 1.2 : 1;
+}
+
+// 1行maxCharsPerLine相当の幅・最大2行に収める。収まらない場合は複数のテロップカードに
 // 分割する(文字を削って情報を失うより、カードを増やして尺を分け合う方を優先する)。
 // maxCharsPerLineの実際に安全な値はシーケンスの解像度・キャプションのフォントサイズに
 // 依存するため(例: 縦型/狭い解像度だと16文字でもPremiere側がさらに折り返してしまう)、
@@ -956,13 +967,20 @@ function wrapTelopText(text, maxCharsPerLine) {
     const lines = [];
     let rest = s;
     while (rest.length > 0) {
-      if (rest.length <= maxChars) { lines.push(rest); break; }
-      const breakPoints = findBreakPoints(rest).filter((p) => p > 0 && p <= maxChars);
-      // 行の後半(文字数の半分以降)にある最も右寄りの切れ目を優先。早すぎる位置で切って
-      // 行が不自然に短くなるのを避ける。見つからなければ文字数いっぱいで機械的に切る。
-      const nearEnd = breakPoints.filter((p) => p >= Math.ceil(maxChars / 2));
+      let acc = 0;
+      let fitIdx = 0;
+      for (let i = 0; i < rest.length; i++) {
+        acc += charWeight(rest[i]);
+        if (acc <= maxChars) fitIdx = i + 1; else break;
+      }
+      if (fitIdx >= rest.length) { lines.push(rest); break; }
+      if (fitIdx <= 0) fitIdx = 1; // 1文字も入らない極端なケースの保険
+      const breakPoints = findBreakPoints(rest).filter((p) => p > 0 && p <= fitIdx);
+      // 行の後半(幅の半分以降)にある最も右寄りの切れ目を優先。早すぎる位置で切って
+      // 行が不自然に短くなるのを避ける。見つからなければ幅いっぱいで機械的に切る。
+      const nearEnd = breakPoints.filter((p) => p >= Math.ceil(fitIdx / 2));
       let cut = nearEnd.length > 0 ? nearEnd[nearEnd.length - 1]
-        : (breakPoints.length > 0 ? breakPoints[breakPoints.length - 1] : maxChars);
+        : (breakPoints.length > 0 ? breakPoints[breakPoints.length - 1] : fitIdx);
       lines.push(rest.slice(0, cut).trim());
       rest = rest.slice(cut).trim();
     }
@@ -1145,7 +1163,7 @@ async function workflowTelop(opts) {
   const captionsByPath = {};
   for (const p of paths) {
     const outDir = ensureDir(path.join(jobDir, Buffer.from(p).toString('hex').slice(0, 24)));
-    captionsByPath[p] = await transcribeFile(p, language, model, outDir);
+    captionsByPath[p] = await transcribeFile(p, language, model, outDir, scenarioText);
   }
 
   let rawCaptions = mapIntervalsToTimeline(clips, captionsByPath, (iv) => ({ text: iv.text }));

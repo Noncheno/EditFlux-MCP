@@ -59,6 +59,7 @@ def main():
     parser.add_argument("--language", default="ja", help="言語コード(既定: ja)")
     parser.add_argument("--model", default="medium", help="Whisperモデルサイズ(既定: medium)")
     parser.add_argument("--max-chars-per-line", type=int, default=18, help="1行あたりの最大文字数")
+    parser.add_argument("--initial-prompt", default=None, help="固有名詞・専門用語の認識精度を上げるためのヒント文")
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
@@ -82,7 +83,10 @@ def main():
     model = whisper.load_model(args.model)
 
     print("文字起こし中... (音声の長さによっては数分かかります)")
-    result = model.transcribe(args.input, language=args.language)
+    transcribe_kwargs = {"language": args.language}
+    if args.initial_prompt:
+        transcribe_kwargs["initial_prompt"] = args.initial_prompt
+    result = model.transcribe(args.input, **transcribe_kwargs)
     segments = result.get("segments", [])
 
     captions = []
