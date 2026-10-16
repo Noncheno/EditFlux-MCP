@@ -156,14 +156,16 @@
     window.runTelop = async function () {
         var btn = document.getElementById('telopBtn');
         var model = document.getElementById('whisperModel').value;
+        var preset = document.getElementById('telopPreset').value;
         btn.disabled = true;
         log('テロップを生成中… (文字起こしには数分かかる場合があります)', 'info');
         try {
-            var result = await fetchJSON('/telop', 'POST', { model: model, language: 'ja' });
+            var result = await fetchJSON('/telop', 'POST', { model: model, language: 'ja', preset: preset });
+            var failNote = result.failed > 0 ? (' / 失敗 ' + result.failed + '件: ' + (result.failureSample || []).join(' / ')) : '';
             log(
-                'テロップ生成完了: "' + result.sequenceName + '" / キャプション数 ' + result.captions +
-                (result.note ? ' / ' + result.note : ''),
-                'ok'
+                'テロップ生成完了: "' + result.sequenceName + '" / スタイル: ' + (result.presetLabel || preset) +
+                ' / カード数 ' + result.cards + ' / 配置成功 ' + result.placed + failNote,
+                result.failed > 0 ? 'error' : 'ok'
             );
         } catch (e) {
             log('テロップ生成失敗: ' + e.message, 'error');

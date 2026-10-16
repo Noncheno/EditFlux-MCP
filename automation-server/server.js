@@ -358,6 +358,23 @@ function scriptApplyJumpCuts(silenceRanges) {
 // 前提: 各トラックに元のソースクリップが1本だけ乗っている状態(カット前の生素材)であること。
 // 既に複数クリップに分かれているトラックでは、そのトラックの最初のクリップのメディアだけで
 // 埋め直してしまうため正しく動作しない。
+// テロップ用に、既存の映像トラックの上に専用トラックを1本追加する。既存の映像を
+// 上書きしないため。
+const SCRIPT_ADD_TOP_VIDEO_TRACK = `${QE_HELPERS}
+(function(){
+  try {
+    var seq = app.project.activeSequence;
+    if (!seq) return JSON.stringify({ success: false, error: 'アクティブなシーケンスがありません' });
+    var qeSeq = __qeSequenceFor(seq);
+    if (!qeSeq) return JSON.stringify({ success: false, error: 'QEシーケンスを取得できませんでした' });
+    var before = seq.videoTracks.numTracks;
+    qeSeq.addTracks(1, before, 0, 1, 0, 0, 0);
+    var after = seq.videoTracks.numTracks;
+    if (after <= before) return JSON.stringify({ success: false, error: 'トラックの追加に失敗しました' });
+    return JSON.stringify({ success: true, trackIndex: after - 1 });
+  } catch (e) { return JSON.stringify({ success: false, error: String(e) }); }
+})();`;
+
 function scriptApplyJumpCutsReinsert(silenceRanges) {
   const silencesJSON = JSON.stringify(silenceRanges);
   return `(function(){
@@ -529,6 +546,116 @@ function scriptImportAndCreateCaptionTrack(srtPath) {
       var created = seq.createCaptionTrack(newItem, 0);
       app.project.save();
       return JSON.stringify({ success: true, created: !!created, itemId: newItem.nodeId, itemName: newItem.name });
+    } catch (e) { return JSON.stringify({ success: false, error: String(e) }); }
+  })();`;
+}
+
+// PremiereのExtendScriptには「文字からタイトルを作る」API自体が無いため、.mogrt(モーション
+// グラフィックステンプレート)に文字を流し込む方式しか手段がない。MOGRTのテキストは
+// 「4バイトのヘッダー + mTextParam構造のJSON」というPremiere内部フォーマットで保存されており、
+// 単純にsetValue(文字列)しても描画に反映されない。このパース/書き換え戦略は
+// adobe-premiere-pro-mcp本家のsrc/tools/domains/graphics.ts(add_text_overlay)が実機検証済みの
+// もので、ここではそのロジックをテロップ用に簡略化して流用する。
+function scriptImportMogrtWithText(mogrtPath, trackIndex, startSec, endSec, text) {
+  return `(function(){
+    try {
+      var seq = app.project.activeSequence;
+      if (!seq) return JSON.stringify({ success: false, error: 'アクティブなシーケンスがありません' });
+      var timeTicks = String(Math.round(${startSec} * 254016000000));
+      var trackItem = seq.importMGT(${esc(mogrtPath)}, timeTicks, ${trackIndex}, 0);
+      if (!trackItem) return JSON.stringify({ success: false, error: 'MOGRTのインポートに失敗しました: ' + ${esc(mogrtPath)} });
+
+      function looksLikeTextProperty(displayName, mpVal) {
+        var dn = String(displayName || '').toLowerCase();
+        if (dn.indexOf('source text') >= 0 || dn.indexOf('texto de origen') >= 0 || dn.indexOf('texte source') >= 0) return true;
+        if (dn === 'text' || dn === 'title' || dn === 'subtitle' || dn === 'headline') return true;
+        if (typeof mpVal === 'string' && (
+            mpVal.indexOf('mTextString') >= 0 ||
+            mpVal.indexOf('textEditValue') >= 0 ||
+            mpVal.indexOf('mTextParam') >= 0)) return true;
+        return false;
+      }
+
+      var textComps = [];
+      try {
+        var mgtComp = trackItem.getMGTComponent();
+        if (mgtComp && mgtComp.properties) {
+          for (var mi = 0; mi < mgtComp.properties.numItems; mi++) {
+            var mp = mgtComp.properties[mi];
+            var mpVal = null;
+            try { mpVal = mp.getValue(); } catch (eMPv) {}
+            if (looksLikeTextProperty(mp.displayName, mpVal)) {
+              textComps.push({ prop: mp });
+            }
+          }
+        }
+      } catch (eMGTC) {}
+      if (textComps.length === 0) {
+        for (var ci = 0; ci < trackItem.components.numItems; ci++) {
+          var c = trackItem.components[ci];
+          var mn = (c.matchName !== undefined) ? String(c.matchName) : '';
+          if (mn === 'AE.ADBE Text') {
+            textComps.push({ prop: c.properties[0] });
+          } else if (c.properties) {
+            for (var pi = 0; pi < c.properties.numItems; pi++) {
+              var p = c.properties[pi];
+              var pVal = null;
+              try { pVal = p.getValue(); } catch (ePv) {}
+              if (looksLikeTextProperty(p.displayName, pVal)) textComps.push({ prop: p });
+            }
+          }
+        }
+      }
+      if (textComps.length === 0) {
+        return JSON.stringify({ success: false, error: 'MOGRT内にテキストプロパティが見つかりませんでした', clipId: trackItem.nodeId });
+      }
+
+      var sourceTextProp = textComps[0].prop;
+      var newText = ${esc(text)};
+      var ok = false, errorDetail = '';
+      try {
+        var rawValStr = String(sourceTextProp.getValue());
+        var headerBytes = '', textObj = null;
+        try {
+          headerBytes = rawValStr.substring(0, 4);
+          textObj = JSON.parse(rawValStr.substring(4));
+        } catch (eP1) {
+          try { textObj = JSON.parse(rawValStr); headerBytes = ''; } catch (eP2) {
+            var brace = rawValStr.indexOf('{');
+            if (brace >= 0) {
+              try { headerBytes = rawValStr.substring(0, brace); textObj = JSON.parse(rawValStr.substring(brace)); } catch (eP3) { textObj = null; }
+            }
+          }
+        }
+        if (!textObj) {
+          sourceTextProp.setValue(newText, true);
+          var afterRaw = String(sourceTextProp.getValue());
+          ok = afterRaw.indexOf(newText) >= 0;
+          if (!ok) errorDetail = 'JSON解析に失敗し、文字列そのままの書き込みも反映されませんでした';
+        } else {
+          var mutated = false;
+          if (textObj.mTextParam && textObj.mTextParam.mStyleSheet) { textObj.mTextParam.mStyleSheet.mText = newText; mutated = true; }
+          if (textObj.textEditValue !== undefined) { textObj.textEditValue = newText; textObj.fontTextRunLength = [newText.length]; mutated = true; }
+          if (textObj.mTextString !== undefined) { textObj.mTextString = newText; mutated = true; }
+          if (!mutated) {
+            errorDetail = 'JSONは解析できましたが、既知のテキストフィールドが見つかりませんでした';
+          } else {
+            var newRawVal = headerBytes + JSON.stringify(textObj);
+            sourceTextProp.setValue(newRawVal, true);
+            ok = true;
+          }
+        }
+      } catch (eSet) { errorDetail = String(eSet); }
+
+      // 尺をキャプションの長さに合わせてトリムする(MOGRTの既定の長さのままだと
+      // 発話タイミングとズレるため)。失敗しても致命的ではないので握りつぶす。
+      try {
+        var endTime = new Time();
+        endTime.seconds = ${endSec};
+        trackItem.end = endTime;
+      } catch (eTrim) {}
+
+      return JSON.stringify({ success: ok, clipId: trackItem.nodeId, error: ok ? undefined : errorDetail });
     } catch (e) { return JSON.stringify({ success: false, error: String(e) }); }
   })();`;
 }
@@ -727,6 +854,49 @@ const JUMP_CUT_PRESETS = {
   vlog: { label: 'Vlog・日常系動画', minDurationSec: 1.0, residualSec: 0.3 }
 };
 
+// テロップ用フォントプリセット。Premiereのエッセンシャルグラフィックスパネルで
+// 1つの文字レイヤーに「マイスタイル」を適用 → .mogrtとして書き出す、を繰り返して増やす
+// (ONECLICK.md参照)。キーはパネルのプリセット選択に使う識別子。
+const TELOP_PRESETS = {
+  style1: {
+    label: '白地+紺枠',
+    mogrtPath: '/Users/katagirinozomi/Library/Application Support/Adobe/Common/Motion Graphics Templates/白地+紺枠.mogrt'
+  }
+};
+const DEFAULT_TELOP_PRESET = 'style1';
+const TELOP_MAX_CHARS_PER_LINE = 16;
+const TELOP_MAX_LINES = 2;
+
+// 1行16文字・最大2行(合計32文字)に収める。収まらない場合は複数のテロップカードに
+// 分割する(文字を削って情報を失うより、カードを増やして尺を分け合う方を優先する)。
+// 戻り値: [{ text: '1〜2行(\\nで改行)', charCount: number }]
+function wrapTelopText(text) {
+  const breakChars = '。、！？,.!? 　';
+  function wrapLine(s) {
+    const lines = [];
+    let rest = s;
+    while (rest.length > 0) {
+      if (rest.length <= TELOP_MAX_CHARS_PER_LINE) { lines.push(rest); break; }
+      const window = rest.slice(0, TELOP_MAX_CHARS_PER_LINE);
+      let cut = -1;
+      for (let i = window.length - 1; i >= Math.max(0, window.length - 8); i--) {
+        if (breakChars.indexOf(rest[i]) >= 0) { cut = i + 1; break; }
+      }
+      if (cut === -1) cut = TELOP_MAX_CHARS_PER_LINE;
+      lines.push(rest.slice(0, cut).trim());
+      rest = rest.slice(cut).trim();
+    }
+    return lines;
+  }
+  const allLines = wrapLine(text.trim());
+  const cards = [];
+  for (let i = 0; i < allLines.length; i += TELOP_MAX_LINES) {
+    const chunk = allLines.slice(i, i + TELOP_MAX_LINES);
+    cards.push({ text: chunk.join('\n'), lineCount: chunk.length });
+  }
+  return cards;
+}
+
 // ───────────────────────── ワークフロー ─────────────────────────
 
 async function workflowJumpCut(opts) {
@@ -836,6 +1006,12 @@ function writeSrt(captions, outPath) {
 async function workflowTelop(opts) {
   const language = opts.language || 'ja';
   const model = opts.model || 'small';
+  const presetKey = opts.preset && TELOP_PRESETS[opts.preset] ? opts.preset : DEFAULT_TELOP_PRESET;
+  const preset = TELOP_PRESETS[presetKey];
+  if (!preset) throw new Error(`テロップのフォントプリセット "${presetKey}" が見つかりません。`);
+  if (!fs.existsSync(preset.mogrtPath)) {
+    throw new Error(`MOGRTファイルが見つかりません: ${preset.mogrtPath}`);
+  }
 
   const info = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO);
   const clips = (info.audio && info.audio[0] && info.audio[0].clips) || [];
@@ -858,18 +1034,59 @@ async function workflowTelop(opts) {
     return { success: true, message: '音声から文字を検出できませんでした。', sequenceName: info.name, captions: 0 };
   }
 
+  // 参考用にSRTも残しておく(タイムライン上には適用しない)。
   const srtPath = path.join(jobDir, 'captions.srt');
   writeSrt(timelineCaptions, srtPath);
 
-  const result = await evalJSON(scriptImportAndCreateCaptionTrack(srtPath));
+  // 1行16文字・最大2行に収まらないセグメントは、文字数に応じて尺を分け合う
+  // 複数カードに展開する。
+  const cards = [];
+  for (const cap of timelineCaptions) {
+    const text = stripPunctuation(cap.text);
+    const wrapped = wrapTelopText(text);
+    if (wrapped.length === 0) continue;
+    const totalChars = wrapped.reduce((sum, w) => sum + w.text.replace(/\n/g, '').length, 0) || 1;
+    const duration = cap.end - cap.start;
+    let cursor = cap.start;
+    for (const w of wrapped) {
+      const chars = w.text.replace(/\n/g, '').length;
+      const share = duration * (chars / totalChars);
+      const cardEnd = Math.min(cap.end, cursor + share);
+      cards.push({ text: w.text, start: cursor, end: Math.max(cardEnd, cursor + 0.2) });
+      cursor = cardEnd;
+    }
+  }
+
+  const addTrackResult = await evalJSON(SCRIPT_ADD_TOP_VIDEO_TRACK);
+  if (addTrackResult.error) throw new Error(`テロップ用トラックの追加に失敗しました: ${addTrackResult.error}`);
+  const trackIndex = addTrackResult.trackIndex;
+
+  let placed = 0, failed = 0;
+  const failures = [];
+  for (const card of cards) {
+    try {
+      const result = await evalJSON(scriptImportMogrtWithText(preset.mogrtPath, trackIndex, card.start, card.end, card.text));
+      if (result.success) placed++;
+      else { failed++; failures.push(result.error); }
+    } catch (e) {
+      failed++;
+      failures.push(e.message);
+    }
+  }
+  await evalJSON(SCRIPT_SAVE);
 
   return {
     success: true,
     sequenceName: info.name,
+    preset: presetKey,
+    presetLabel: preset.label,
     captions: timelineCaptions.length,
+    cards: cards.length,
+    placed: placed,
+    failed: failed,
+    failureSample: failures.slice(0, 3),
     srtPath: srtPath,
-    captionTrackCreated: result.created,
-    note: 'キャプションは既定スタイルで作成されました。文字色・縁取り・位置はPremiereの「キャプション」パネルで調整してください。'
+    trackIndex: trackIndex
   };
 }
 
