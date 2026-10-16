@@ -1090,15 +1090,72 @@ function stripPunctuation(text) {
   return text.replace(/[。、！？]/g, '');
 }
 
+// 句読点除去は呼び出し側で必要な場合だけ適用済みのテキストを渡す(手書きカードの場合は
+// 原稿の表記をそのまま残したいため、ここでは一切加工しない)。
 function writeSrt(captions, outPath) {
   const lines = [];
   captions.forEach((c, i) => {
     lines.push(String(i + 1));
     lines.push(`${formatSrtTime(c.start)} --> ${formatSrtTime(c.end)}`);
-    lines.push(stripPunctuation(c.text));
+    lines.push(c.text);
     lines.push('');
   });
   fs.writeFileSync(outPath, lines.join('\n'), 'utf8');
+}
+
+// シナリオ欄が「空行区切りのカード」形式で書かれているかを判定する。
+// カード形式の場合、各カードの改行はユーザーが文節を考えて手で入れたものとして扱い、
+// 自動改行(wrapTelopText)も句読点除去(stripPunctuation)も行わない。
+// (自動改行は語の途中で割れることがあるため、手書きの改行をそのまま尊重する)
+function parseScenarioCards(scenarioText) {
+  const normalized = String(scenarioText).replace(/\r\n/g, '\n');
+  const blocks = normalized.split(/\n\s*\n+/).map((b) => b.trim()).filter((b) => b.length > 0);
+  return blocks.map((b) => ({
+    text: b,
+    lines: b.split('\n').map((l) => l.trim()).filter((l) => l.length > 0)
+  }));
+}
+
+// カードごとの重み付き文字数(漢字を1.2倍)の比率で、timelineの実時間(segmentsの合計時間)を
+// 配分する。segments間の無音・カット区間はweight空間に含まれないため、字幕がカットの隙間に
+// かからないようになる。
+function distributeCardsAcrossSegments(cards, segments) {
+  if (cards.length === 0 || segments.length === 0) return [];
+  const totalDuration = segments.reduce((sum, s) => sum + Math.max(0, s.end - s.start), 0);
+  if (totalDuration <= 0) return [];
+
+  function timeAtDuration(targetDuration) {
+    let acc = 0;
+    for (const seg of segments) {
+      const dur = Math.max(0, seg.end - seg.start);
+      if (acc + dur >= targetDuration) {
+        return seg.start + Math.max(0, Math.min(dur, targetDuration - acc));
+      }
+      acc += dur;
+    }
+    return segments[segments.length - 1].end;
+  }
+
+  const weights = cards.map((c) => {
+    let w = 0;
+    for (const ch of c.text.replace(/\n/g, '')) w += charWeight(ch);
+    return w || 1;
+  });
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+
+  const result = [];
+  let cumWeight = 0;
+  let prevTime = segments[0].start;
+  for (let i = 0; i < cards.length; i++) {
+    cumWeight += weights[i];
+    const isLast = i === cards.length - 1;
+    const t = isLast ? segments[segments.length - 1].end : timeAtDuration(totalDuration * (cumWeight / totalWeight));
+    const start = prevTime;
+    const end = Math.max(start + 0.2, t);
+    result.push({ start, end, text: cards[i].lines.join('\n') });
+    prevTime = end;
+  }
+  return result;
 }
 
 // Whisperの文字起こし結果は脱字・誤認識が出やすいが、タイミング(各セグメントの開始/終了)は
@@ -1172,8 +1229,33 @@ async function workflowTelop(opts) {
   }
   rawCaptions.sort((a, b) => a.start - b.start);
 
+  // シナリオ欄が空行区切りの「カード」形式(1枚ずつ本人が改行を決めて書いたもの)なら、
+  // 自動改行・句読点除去を一切せず、書かれた通りのテキストを音声のタイミングにだけ合わせる。
+  // 空行なしの連続した文章として貼られた場合は、従来通り自動で文節判定して改行・分割する。
+  const hasManualCards = /\n[ \t]*\n/.test(scenarioText.replace(/\r\n/g, '\n'));
   let usedScenario = false;
-  if (scenarioText.length > 0) {
+  let manualCardMode = false;
+  const cardWarnings = [];
+  let timelineCaptions = [];
+
+  if (scenarioText.length > 0 && hasManualCards) {
+    const cards = parseScenarioCards(scenarioText);
+    const segments = rawCaptions.map((c) => ({ start: c.start, end: c.end }));
+    const aligned = distributeCardsAcrossSegments(cards, segments);
+    if (aligned.length > 0) {
+      usedScenario = true;
+      manualCardMode = true;
+      timelineCaptions = aligned;
+      cards.forEach((c, i) => {
+        if (c.lines.length > 2) cardWarnings.push(`カード${i + 1}: 3行以上になっています`);
+        c.lines.forEach((line) => {
+          let w = 0;
+          for (const ch of line) w += charWeight(ch);
+          if (w > maxCharsPerLine) cardWarnings.push(`カード${i + 1}: 「${line}」が1行の目安(${maxCharsPerLine}文字相当)を超えています`);
+        });
+      });
+    }
+  } else if (scenarioText.length > 0) {
     const aligned = alignScriptToSegments(scenarioText, rawCaptions.map((c) => ({ start: c.start, end: c.end })));
     if (aligned.length > 0) {
       rawCaptions = aligned;
@@ -1181,24 +1263,25 @@ async function workflowTelop(opts) {
     }
   }
 
-  // キャプショントラックはMOGRTインポートより大幅に軽く、ユーザーが後で手動で
-  // 「キャプションをグラフィックに変換」する前提の軽量出力として使う。
-  // 1行16文字・最大2行に収まらないセグメントは、文字数に応じて尺を分け合う
-  // 複数キャプションに展開する(句読点は除去)。
-  const timelineCaptions = [];
-  for (const cap of rawCaptions) {
-    const text = stripPunctuation(cap.text);
-    const wrapped = wrapTelopText(text, maxCharsPerLine);
-    if (wrapped.length === 0) continue;
-    const totalChars = wrapped.reduce((sum, w) => sum + w.text.replace(/\n/g, '').length, 0) || 1;
-    const duration = cap.end - cap.start;
-    let cursor = cap.start;
-    for (const w of wrapped) {
-      const chars = w.text.replace(/\n/g, '').length;
-      const share = duration * (chars / totalChars);
-      const cardEnd = Math.min(cap.end, cursor + share);
-      timelineCaptions.push({ text: w.text, start: cursor, end: Math.max(cardEnd, cursor + 0.2) });
-      cursor = cardEnd;
+  if (!manualCardMode) {
+    // キャプショントラックはMOGRTインポートより大幅に軽く、ユーザーが後で手動で
+    // 「キャプションをグラフィックに変換」する前提の軽量出力として使う。
+    // 1行maxCharsPerLine文字・最大2行に収まらないセグメントは、文字数に応じて尺を分け合う
+    // 複数キャプションに展開する(句読点は除去)。
+    for (const cap of rawCaptions) {
+      const text = stripPunctuation(cap.text);
+      const wrapped = wrapTelopText(text, maxCharsPerLine);
+      if (wrapped.length === 0) continue;
+      const totalChars = wrapped.reduce((sum, w) => sum + w.text.replace(/\n/g, '').length, 0) || 1;
+      const duration = cap.end - cap.start;
+      let cursor = cap.start;
+      for (const w of wrapped) {
+        const chars = w.text.replace(/\n/g, '').length;
+        const share = duration * (chars / totalChars);
+        const cardEnd = Math.min(cap.end, cursor + share);
+        timelineCaptions.push({ text: w.text, start: cursor, end: Math.max(cardEnd, cursor + 0.2) });
+        cursor = cardEnd;
+      }
     }
   }
 
@@ -1215,10 +1298,14 @@ async function workflowTelop(opts) {
     srtPath: srtPath,
     captionTrackCreated: result.created,
     usedScenario: usedScenario,
+    manualCardMode: manualCardMode,
     maxCharsPerLine: maxCharsPerLine,
-    note: usedScenario
-      ? 'シナリオ本文を音声のタイミングに合わせて配置しました(Whisperの認識テキストは使用していません)。必要ならPremiereの「キャプションをグラフィックに変換」でお好みのスタイルに変えてください。'
-      : '既定のキャプションスタイルで追加されました。必要ならPremiereの「キャプションをグラフィックに変換」でお好みのスタイルに変えてください。'
+    warnings: cardWarnings,
+    note: manualCardMode
+      ? 'カードごとの改行・表記をそのまま使い、音声のタイミングにだけ合わせました(自動改行・句読点除去なし)。'
+      : usedScenario
+        ? 'シナリオ本文を音声のタイミングに合わせて配置しました(Whisperの認識テキストは使用していません)。必要ならPremiereの「キャプションをグラフィックに変換」でお好みのスタイルに変えてください。'
+        : '既定のキャプションスタイルで追加されました。必要ならPremiereの「キャプションをグラフィックに変換」でお好みのスタイルに変えてください。'
   };
 }
 

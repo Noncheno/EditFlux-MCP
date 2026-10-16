@@ -198,7 +198,14 @@
                 この本文を音声のタイミングに合わせて配置します(脱字・誤認識対策)。空欄ならWhisperの認識結果をそのまま使います。
                 貼り付けた内容はWhisperの認識精度を上げるヒントとしても使われるので、台本が無くても
                 固有名詞や専門用語だけ書いておくだけでも誤字が減りやすい。精度を上げたい場合は上の
-                モデルを「medium」や「large-v3」に変えるのも有効(その分時間がかかる)。
+                モデルを「medium」や「large-v3」に変えるのも有効(その分時間がかかる)。<br><br>
+                <b>1枚ずつ空行で区切って書くと</b>、その中の改行・表記(句読点・数字等)をそのまま使い、
+                自動改行や句読点除去を一切しない(文節の途中で割れるのを防ぐため)。例:<br>
+                <code style="white-space:pre; display:block; margin-top:4px; opacity:0.85;">55歳で
+相続放棄しました
+
+1,000万円の
+借金がありました</code>
             </div>
             <textarea id="telopScript" placeholder="(任意) シナリオ本文を貼り付け" style="width:100%; min-height:70px; resize:vertical; background:rgba(9,17,25,0.72); color:var(--text-0); border:1px solid var(--panel-border); border-radius:8px; padding:6px; font-size:11px; margin-bottom:8px;"></textarea>
             <div class="file-label" style="margin:10px 0;">

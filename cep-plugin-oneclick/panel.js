@@ -185,11 +185,14 @@
             var result = await fetchJSON('/telop', 'POST', { model: model, language: 'ja', script: script, maxCharsPerLine: maxCharsPerLine });
             log(
                 'テロップ生成完了: "' + result.sequenceName + '" / キャプション数 ' + result.captions +
-                ' / 1行' + result.maxCharsPerLine + '文字' +
-                (result.usedScenario ? ' / シナリオ本文を使用' : '') +
+                (result.manualCardMode ? ' / カード形式(手書き改行)' : ' / 1行' + result.maxCharsPerLine + '文字') +
+                (result.usedScenario && !result.manualCardMode ? ' / シナリオ本文を使用' : '') +
                 (result.note ? ' / ' + result.note : ''),
                 'ok'
             );
+            if (result.warnings && result.warnings.length > 0) {
+                result.warnings.forEach(function (w) { log('注意: ' + w, 'error'); });
+            }
         } catch (e) {
             log('テロップ生成失敗: ' + e.message, 'error');
         } finally {
