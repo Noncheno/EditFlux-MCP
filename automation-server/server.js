@@ -917,22 +917,45 @@ function resolveTelopPreset(presetKey) {
 const TELOP_MAX_CHARS_PER_LINE = 16;
 const TELOP_MAX_LINES = 2;
 
+// 句読点の直後、および助詞(は/が/を/に/で/と/も/の 等)の直後は文節の切れ目になりやすいため
+// 改行候補として優先する。文字数だけで機械的に切るより読みやすい位置で折り返す。
+const TELOP_PUNCT_BREAK = '。、！？,.!?　 ';
+const TELOP_PARTICLE_BREAK = ['という', 'ので', 'けど', 'から', 'まで', 'より', 'だけ', 'など', 'って',
+  'は', 'が', 'を', 'に', 'で', 'と', 'も', 'の', 'へ'];
+
+// 文字列中の「ここで改行してよい」位置(その文字の直後)を、出現位置の昇順で返す。
+// 句読点・助詞の直後を候補にする。
+function findBreakPoints(s) {
+  const points = new Set();
+  for (let i = 0; i < s.length; i++) {
+    if (TELOP_PUNCT_BREAK.indexOf(s[i]) >= 0) points.add(i + 1);
+  }
+  for (const particle of TELOP_PARTICLE_BREAK) {
+    let from = 0;
+    let idx;
+    while ((idx = s.indexOf(particle, from)) >= 0) {
+      points.add(idx + particle.length);
+      from = idx + particle.length;
+    }
+  }
+  return Array.from(points).sort((a, b) => a - b);
+}
+
 // 1行16文字・最大2行(合計32文字)に収める。収まらない場合は複数のテロップカードに
 // 分割する(文字を削って情報を失うより、カードを増やして尺を分け合う方を優先する)。
 // 戻り値: [{ text: '1〜2行(\\nで改行)', charCount: number }]
 function wrapTelopText(text) {
-  const breakChars = '。、！？,.!? 　';
   function wrapLine(s) {
     const lines = [];
     let rest = s;
     while (rest.length > 0) {
       if (rest.length <= TELOP_MAX_CHARS_PER_LINE) { lines.push(rest); break; }
-      const window = rest.slice(0, TELOP_MAX_CHARS_PER_LINE);
-      let cut = -1;
-      for (let i = window.length - 1; i >= Math.max(0, window.length - 8); i--) {
-        if (breakChars.indexOf(rest[i]) >= 0) { cut = i + 1; break; }
-      }
-      if (cut === -1) cut = TELOP_MAX_CHARS_PER_LINE;
+      const breakPoints = findBreakPoints(rest).filter((p) => p > 0 && p <= TELOP_MAX_CHARS_PER_LINE);
+      // 行の後半(文字数の半分以降)にある最も右寄りの切れ目を優先。早すぎる位置で切って
+      // 行が不自然に短くなるのを避ける。見つからなければ文字数いっぱいで機械的に切る。
+      const nearEnd = breakPoints.filter((p) => p >= Math.ceil(TELOP_MAX_CHARS_PER_LINE / 2));
+      let cut = nearEnd.length > 0 ? nearEnd[nearEnd.length - 1]
+        : (breakPoints.length > 0 ? breakPoints[breakPoints.length - 1] : TELOP_MAX_CHARS_PER_LINE);
       lines.push(rest.slice(0, cut).trim());
       rest = rest.slice(cut).trim();
     }
