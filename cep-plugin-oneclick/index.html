@@ -174,7 +174,15 @@
         </div>
 
         <div class="step-content" data-step="2">
-            <button onclick="runTelop()" id="telopBtn">テロップを生成</button>
+            <button class="secondary" onclick="runTelopRefine()" id="telopRefineBtn">
+                Premiereの文字起こしを整形(推奨・書き出し不要)
+            </button>
+            <div class="file-label" style="margin:-4px 0 10px;">
+                先にPremiereの「文字起こし」(Text/テキストパネル → シーケンスを文字起こし)で
+                書き起こし、聞きながらその場で誤字を直してから、このボタンを押す。
+                SRTの書き出しは不要(読み取れた場合のみ)。読み取れない場合はエラーで案内する。
+            </div>
+            <button onclick="runTelop()" id="telopBtn">テロップを生成(Whisper・自動文字起こし)</button>
             <div class="opts">
                 <select id="whisperModel">
                     <option value="small" selected>精度: 標準(small)</option>

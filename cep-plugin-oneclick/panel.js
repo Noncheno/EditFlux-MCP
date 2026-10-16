@@ -52,7 +52,7 @@
     }
 
     function setButtonsEnabled(enabled) {
-        ['jumpCutBtn', 'telopBtn'].forEach(function (id) {
+        ['jumpCutBtn', 'telopBtn', 'telopRefineBtn'].forEach(function (id) {
             var btn = document.getElementById(id);
             if (btn) btn.disabled = !enabled;
         });
@@ -195,6 +195,30 @@
             }
         } catch (e) {
             log('テロップ生成失敗: ' + e.message, 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    };
+
+    window.runTelopRefine = async function () {
+        var btn = document.getElementById('telopRefineBtn');
+        var script = document.getElementById('telopScript').value;
+        var maxCharsPerLine = parseInt(document.getElementById('telopMaxChars').value, 10);
+        btn.disabled = true;
+        log('Premiereのキャプションを読み取り中…', 'info');
+        try {
+            var result = await fetchJSON('/telop-refine', 'POST', { script: script, maxCharsPerLine: maxCharsPerLine });
+            log(
+                'テロップ整形完了: "' + result.sequenceName + '" / キャプション数 ' + result.captions +
+                (result.manualCardMode ? ' / カード形式(手書き改行)' : ' / 1行' + result.maxCharsPerLine + '文字') +
+                (result.note ? ' / ' + result.note : ''),
+                'ok'
+            );
+            if (result.warnings && result.warnings.length > 0) {
+                result.warnings.forEach(function (w) { log('注意: ' + w, 'error'); });
+            }
+        } catch (e) {
+            log('テロップ整形失敗: ' + e.message, 'error');
         } finally {
             btn.disabled = false;
         }

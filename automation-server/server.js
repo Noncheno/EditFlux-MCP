@@ -508,6 +508,64 @@ function scriptApplyJumpCutsReinsert(silenceRanges) {
   })();`;
 }
 
+// Premiereのスクリプトdomには「キャプションの中身を読む」公式APIが無い(read_sequence_captions
+// 相当の機能がドキュメント化されていない)。そのため、.mogrtのテキスト読み書きで実績のある
+// 「clip.components配下のテキストらしいプロパティを総当たりで探す」手法や、clip.name/
+// clip.textなど可能性のあるプロパティを順番に試す、という防御的な方法しかない。
+// 失敗してもエラーにはせず、読めたクリップ数と読めなかったクリップ数を返すので、
+// 呼び出し側で「読めなかったので手動エクスポートに切り替えてください」と案内できるようにする。
+function scriptReadNativeCaptions() {
+  return `(function(){
+    try {
+      var seq = app.project.activeSequence;
+      if (!seq) return JSON.stringify({ success: false, error: 'アクティブなシーケンスがありません' });
+      if (!seq.captionTracks || seq.captionTracks.numTracks === 0) {
+        return JSON.stringify({ success: false, error: 'キャプショントラックが見つかりません。先にPremiereの「文字起こし」でシーケンスを文字起こししてください。' });
+      }
+      var track = seq.captionTracks[0];
+      var clips = [];
+      var readableCount = 0;
+      for (var i = 0; i < track.clips.numItems; i++) {
+        var c = track.clips[i];
+        var startSec = 0, endSec = 0;
+        try { startSec = c.start.seconds; } catch (eS) {}
+        try { endSec = c.end.seconds; } catch (eE) {}
+        var text = null;
+        try { if (typeof c.getText === 'function') { var t0 = c.getText(); if (t0) text = String(t0); } } catch (e1) {}
+        if (!text) { try { if (c.text) text = String(c.text); } catch (e2) {} }
+        if (!text) { try { if (c.name && String(c.name).length > 0) text = String(c.name); } catch (e3) {} }
+        if (!text) {
+          try {
+            for (var ci = 0; ci < c.components.numItems; ci++) {
+              var comp = c.components[ci];
+              if (!comp.properties) continue;
+              for (var pi = 0; pi < comp.properties.numItems; pi++) {
+                var p = comp.properties[pi];
+                var pv = null;
+                try { pv = p.getValue(); } catch (ePv) {}
+                var dn = String(p.displayName || '').toLowerCase();
+                if (typeof pv === 'string' && pv.length > 0 && (dn.indexOf('text') >= 0 || dn.indexOf('source text') >= 0)) {
+                  text = pv; break;
+                }
+              }
+              if (text) break;
+            }
+          } catch (eComp) {}
+        }
+        if (text) readableCount++;
+        clips.push({ start: startSec, end: endSec, text: text });
+      }
+      return JSON.stringify({
+        success: true,
+        trackCount: seq.captionTracks.numTracks,
+        clipCount: clips.length,
+        readableCount: readableCount,
+        clips: clips
+      });
+    } catch (e) { return JSON.stringify({ success: false, error: String(e) }); }
+  })();`;
+}
+
 function scriptImportAndCreateCaptionTrack(srtPath) {
   return `(function(){
     try {
@@ -1228,42 +1286,16 @@ function alignScriptToSegments(scriptText, segments) {
   return chunks;
 }
 
-async function workflowTelop(opts) {
-  const language = opts.language || 'ja';
-  const model = opts.model || 'small';
-  const scenarioText = opts.script ? String(opts.script).trim() : '';
-  const maxCharsPerLine = opts.maxCharsPerLine && opts.maxCharsPerLine > 0 ? opts.maxCharsPerLine : TELOP_MAX_CHARS_PER_LINE;
-
-  const info = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO);
-  const clips = (info.audio && info.audio[0] && info.audio[0].clips) || [];
-  if (clips.length === 0) {
-    throw new Error('オーディオトラック0(A1)にクリップがありません。');
-  }
-
-  const paths = uniqueMediaPaths(clips);
-  if (paths.length === 0) throw new Error('A1クリップのメディアパスを取得できませんでした。');
-
-  const jobDir = ensureDir(path.join(WORK_DIR, `telop-${Date.now()}`));
-  const captionsByPath = {};
-  for (const p of paths) {
-    const outDir = ensureDir(path.join(jobDir, Buffer.from(p).toString('hex').slice(0, 24)));
-    captionsByPath[p] = await transcribeFile(p, language, model, outDir, scenarioText);
-  }
-
-  let rawCaptions = mapIntervalsToTimeline(clips, captionsByPath, (iv) => ({ text: iv.text }));
-  if (rawCaptions.length === 0) {
-    return { success: true, message: '音声から文字を検出できませんでした。', sequenceName: info.name, captions: 0 };
-  }
-  rawCaptions.sort((a, b) => a.start - b.start);
-
-  // シナリオ欄が空行区切りの「カード」形式(1枚ずつ本人が改行を決めて書いたもの)なら、
-  // 自動改行・句読点除去を一切せず、書かれた通りのテキストを音声のタイミングにだけ合わせる。
-  // 空行なしの連続した文章として貼られた場合は、従来通り自動で文節判定して改行・分割する。
+// rawCaptions({start,end,text}の配列、タイムライン時間・start昇順)とシナリオ欄の内容から、
+// 最終的なtimelineCaptionsを組み立てる。Whisper経由でも、Premiereのネイティブ文字起こし経由でも
+// 同じ整形ロジック(自動改行 or 手書きカード)を使い回すための共通処理。
+function buildTimelineCaptions(rawCaptions, scenarioText, maxCharsPerLine) {
   const hasManualCards = /\n[ \t]*\n/.test(scenarioText.replace(/\r\n/g, '\n'));
   let usedScenario = false;
   let manualCardMode = false;
   const cardWarnings = [];
   let timelineCaptions = [];
+  let effectiveRawCaptions = rawCaptions;
 
   if (scenarioText.length > 0 && hasManualCards) {
     const cards = parseScenarioCards(scenarioText);
@@ -1285,7 +1317,7 @@ async function workflowTelop(opts) {
   } else if (scenarioText.length > 0) {
     const aligned = alignScriptToSegments(scenarioText, rawCaptions.map((c) => ({ start: c.start, end: c.end })));
     if (aligned.length > 0) {
-      rawCaptions = aligned;
+      effectiveRawCaptions = aligned;
       usedScenario = true;
     }
   }
@@ -1295,7 +1327,7 @@ async function workflowTelop(opts) {
     // 「キャプションをグラフィックに変換」する前提の軽量出力として使う。
     // 1行maxCharsPerLine文字・最大2行に収まらないセグメントは、文字数に応じて尺を分け合う
     // 複数キャプションに展開する(句読点は除去)。
-    for (const cap of rawCaptions) {
+    for (const cap of effectiveRawCaptions) {
       const text = stripPunctuation(cap.text);
       const wrapped = wrapTelopText(text, maxCharsPerLine);
       if (wrapped.length === 0) continue;
@@ -1312,6 +1344,13 @@ async function workflowTelop(opts) {
     }
   }
 
+  return { timelineCaptions, usedScenario, manualCardMode, cardWarnings };
+}
+
+// 整形済みのtimelineCaptionsをSRTに書き出し、キャプショントラックとして再インポートする
+// 最終ステップ。Whisper経由・ネイティブ文字起こし経由どちらの結果にも共通して使う。
+async function finalizeCaptionImport(info, jobDir, built, maxCharsPerLine, extraNote) {
+  const { timelineCaptions, usedScenario, manualCardMode, cardWarnings } = built;
   const srtPath = path.join(jobDir, 'captions.srt');
   writeSrt(timelineCaptions, srtPath);
 
@@ -1339,9 +1378,79 @@ async function workflowTelop(opts) {
     note: manualCardMode
       ? 'カードごとの改行・表記をそのまま使い、音声のタイミングにだけ合わせました(自動改行・句読点除去なし)。'
       : usedScenario
-        ? 'シナリオ本文を音声のタイミングに合わせて配置しました(Whisperの認識テキストは使用していません)。必要ならPremiereの「キャプションをグラフィックに変換」でお好みのスタイルに変えてください。'
-        : '既定のキャプションスタイルで追加されました。必要ならPremiereの「キャプションをグラフィックに変換」でお好みのスタイルに変えてください。'
+        ? 'シナリオ本文を音声のタイミングに合わせて配置しました(認識テキストは使用していません)。必要ならPremiereの「キャプションをグラフィックに変換」でお好みのスタイルに変えてください。'
+        : (extraNote || '既定のキャプションスタイルで追加されました。必要ならPremiereの「キャプションをグラフィックに変換」でお好みのスタイルに変えてください。')
   };
+}
+
+async function workflowTelop(opts) {
+  const language = opts.language || 'ja';
+  const model = opts.model || 'small';
+  const scenarioText = opts.script ? String(opts.script).trim() : '';
+  const maxCharsPerLine = opts.maxCharsPerLine && opts.maxCharsPerLine > 0 ? opts.maxCharsPerLine : TELOP_MAX_CHARS_PER_LINE;
+
+  const info = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO);
+  const clips = (info.audio && info.audio[0] && info.audio[0].clips) || [];
+  if (clips.length === 0) {
+    throw new Error('オーディオトラック0(A1)にクリップがありません。');
+  }
+
+  const paths = uniqueMediaPaths(clips);
+  if (paths.length === 0) throw new Error('A1クリップのメディアパスを取得できませんでした。');
+
+  const jobDir = ensureDir(path.join(WORK_DIR, `telop-${Date.now()}`));
+  const captionsByPath = {};
+  for (const p of paths) {
+    const outDir = ensureDir(path.join(jobDir, Buffer.from(p).toString('hex').slice(0, 24)));
+    captionsByPath[p] = await transcribeFile(p, language, model, outDir, scenarioText);
+  }
+
+  const rawCaptions = mapIntervalsToTimeline(clips, captionsByPath, (iv) => ({ text: iv.text }));
+  if (rawCaptions.length === 0) {
+    return { success: true, message: '音声から文字を検出できませんでした。', sequenceName: info.name, captions: 0 };
+  }
+  rawCaptions.sort((a, b) => a.start - b.start);
+
+  const built = buildTimelineCaptions(rawCaptions, scenarioText, maxCharsPerLine);
+  return finalizeCaptionImport(info, jobDir, built, maxCharsPerLine);
+}
+
+// Premiereの「文字起こし」(Transcribe Sequence)で作ったネイティブキャプションを読み取り、
+// こちら側の改行ルール(自動 or 手書きカード)で整形し直して再インポートする。
+// Whisper/ffmpegを使わず、SRTの手動書き出しも不要にするための経路。
+// ただしPremiereにキャプションを読む公式APIが無いため、読み取りに失敗することがある
+// (その場合はSRTを手動エクスポートしてもらうようエラーメッセージで案内する)。
+async function workflowRefineNativeCaptions(opts) {
+  const scenarioText = opts.script ? String(opts.script).trim() : '';
+  const maxCharsPerLine = opts.maxCharsPerLine && opts.maxCharsPerLine > 0 ? opts.maxCharsPerLine : TELOP_MAX_CHARS_PER_LINE;
+
+  const info = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO);
+  const read = await evalJSON(scriptReadNativeCaptions());
+  if (!read.success) {
+    throw new Error(read.error || 'ネイティブキャプションの読み取りに失敗しました');
+  }
+  const rawCaptions = (read.clips || [])
+    .filter((c) => c.text && String(c.text).trim().length > 0)
+    .map((c) => ({ start: c.start, end: c.end, text: String(c.text).trim() }))
+    .sort((a, b) => a.start - b.start);
+
+  if (rawCaptions.length === 0) {
+    throw new Error(
+      `Premiereのキャプションの文字を読み取れませんでした(${read.clipCount || 0}個中0個)。` +
+      'Premiereにはキャプションを読む公式な機能が無いため、この自動読み取りは環境によって失敗することがあります。' +
+      'その場合はText(テキスト)パネルからSRTとして書き出し、シナリオ欄に貼り付ける方法をお試しください。'
+    );
+  }
+
+  const jobDir = ensureDir(path.join(WORK_DIR, `telop-refine-${Date.now()}`));
+  const built = buildTimelineCaptions(rawCaptions, scenarioText, maxCharsPerLine);
+  const partial = read.readableCount < read.clipCount
+    ? `(${read.clipCount}個中${read.readableCount}個のみ読み取れました。一部欠落している可能性があります)`
+    : '';
+  return finalizeCaptionImport(
+    info, jobDir, built, maxCharsPerLine,
+    `Premiereのネイティブ文字起こしを整形して再配置しました${partial}。`
+  );
 }
 
 async function workflowInsertMedia(opts) {
@@ -1390,6 +1499,7 @@ const ROUTES = {
   '/health': { method: 'GET', handler: async () => ({ ok: true, ...(await checkHealth()) }) },
   '/jump-cut': { method: 'POST', handler: (body) => workflowJumpCut(body || {}) },
   '/telop': { method: 'POST', handler: (body) => workflowTelop(body || {}) },
+  '/telop-refine': { method: 'POST', handler: (body) => workflowRefineNativeCaptions(body || {}) },
   '/insert-media': { method: 'POST', handler: (body) => workflowInsertMedia(body || {}) },
   '/telop-presets': { method: 'GET', handler: async () => ({ presets: listTelopPresets(), dir: TELOP_PRESETS_DIR }) }
 };
