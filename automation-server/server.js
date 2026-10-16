@@ -1613,7 +1613,7 @@ async function geminiMatchTakes(takes, folderNames) {
     `出力はJSON配列で、インデックス順にちょうど${takes.length}個の要素を返してください。` +
     '各要素は {"folder": string|null, "score": number(0〜1の確信度)} の形式にしてください。';
 
-  const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+  const model = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
     {
