@@ -543,12 +543,39 @@ function scriptImportAndCreateCaptionTrack(srtPath) {
       }
       if (!newItem) return JSON.stringify({ success: false, error: 'インポートされたSRTのプロジェクト項目が見つかりません' });
 
+      // テロップ生成を複数回実行すると、既存のキャプショントラックを消さずに毎回新しく
+      // 追加されてしまい、古い生成結果と新しい生成結果が画面上に同時に重なって表示される
+      // (何行にも見える不具合の主因)。削除用のAPIはPremiereのスクリプトDOM上に正式公開
+      // されていないため、存在し得るいくつかの方法を順にtry/catchで試す(どれも失敗しても
+      // 処理自体は続行する。その場合は呼び出し元に警告を返す)。
+      var removedOldTracks = 0;
+      try {
+        if (seq.captionTracks && seq.captionTracks.numTracks > 0) {
+          for (var ci = seq.captionTracks.numTracks - 1; ci >= 0; ci--) {
+            try {
+              var ct = seq.captionTracks[ci];
+              if (ct && typeof ct.deleteTrack === 'function') { ct.deleteTrack(); removedOldTracks++; }
+              else if (ct && typeof ct.remove === 'function') { ct.remove(); removedOldTracks++; }
+            } catch (eCt) {}
+          }
+        }
+      } catch (eCaps) {}
+
       // フォーマット省略時(2引数呼び出し)はPremiereが608/708などの放送用キャプション形式を
       // 既定にすることがあり、その場合は固定文字グリッドでこちら側の改行を無視して
       // 再折り返しされてしまう(例: 2行のつもりが3行になる)。字幕用の自由形式を明示する。
       var created = seq.createCaptionTrack(newItem, 0, Sequence.CAPTION_FORMAT_SUBTITLE);
       app.project.save();
-      return JSON.stringify({ success: true, created: !!created, itemId: newItem.nodeId, itemName: newItem.name });
+      var stillHasOldTracks = false;
+      try { stillHasOldTracks = !!(seq.captionTracks && seq.captionTracks.numTracks > 1); } catch (eCheck) {}
+      return JSON.stringify({
+        success: true,
+        created: !!created,
+        itemId: newItem.nodeId,
+        itemName: newItem.name,
+        removedOldTracks: removedOldTracks,
+        possibleDuplicateCaptionTracks: stillHasOldTracks
+      });
     } catch (e) { return JSON.stringify({ success: false, error: String(e) }); }
   })();`;
 }
@@ -1291,12 +1318,20 @@ async function workflowTelop(opts) {
   const result = await evalJSON(scriptImportAndCreateCaptionTrack(srtPath));
   await evalJSON(SCRIPT_SAVE);
 
+  if (result.possibleDuplicateCaptionTracks) {
+    cardWarnings.push(
+      '古いキャプショントラックが残っている可能性があります。画面上に文字が何行も重なって見える場合は、' +
+      'Premiereのタイムラインで古いキャプショントラックを手動で削除してから、もう一度生成し直してください。'
+    );
+  }
+
   return {
     success: true,
     sequenceName: info.name,
     captions: timelineCaptions.length,
     srtPath: srtPath,
     captionTrackCreated: result.created,
+    removedOldTracks: result.removedOldTracks || 0,
     usedScenario: usedScenario,
     manualCardMode: manualCardMode,
     maxCharsPerLine: maxCharsPerLine,
