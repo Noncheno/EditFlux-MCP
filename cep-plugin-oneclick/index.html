@@ -109,6 +109,32 @@
             text-overflow: ellipsis;
         }
         .style-empty { font-size: 11px; color: var(--text-2); grid-column: 1 / -1; }
+        .steps {
+            display: flex;
+            overflow-x: auto;
+            gap: 2px;
+            margin-bottom: 10px;
+            border-bottom: 1px solid var(--panel-border);
+        }
+        .step-tab {
+            flex: 0 0 auto;
+            padding: 8px 10px;
+            font-size: 11px;
+            color: var(--text-2);
+            cursor: pointer;
+            white-space: nowrap;
+            border-bottom: 2px solid transparent;
+        }
+        .step-tab.active { color: var(--text-0); border-bottom-color: var(--accent); }
+        .step-tab.disabled { color: var(--text-2); opacity: 0.5; cursor: default; }
+        .step-content { display: none; }
+        .step-content.active { display: block; }
+        .coming-soon {
+            font-size: 12px;
+            color: var(--text-2);
+            text-align: center;
+            padding: 24px 8px;
+        }
     </style>
 </head>
 <body>
@@ -128,35 +154,59 @@
     </section>
 
     <section class="panel">
-        <button onclick="runJumpCut()" id="jumpCutBtn">ジャンプカットを実行</button>
-        <div class="opts">
-            <select id="jumpCutPreset">
-                <option value="interview" selected>インタビュー・対談動画(0.5秒以上→0.2秒残す)</option>
-                <option value="presentation">プレゼン・解説動画(0.3秒以上→0.1秒に短縮)</option>
-                <option value="vlog">Vlog・日常系動画(1.0秒以上→0.3秒に詰める)</option>
-            </select>
+        <div class="steps">
+            <div class="step-tab active" data-step="1" onclick="showStep(1)">① NGカット</div>
+            <div class="step-tab" data-step="2" onclick="showStep(2)">② テロップ生成</div>
+            <div class="step-tab" data-step="3" onclick="showStep(3)">③ テロップデザイン</div>
+            <div class="step-tab disabled" data-step="4" onclick="showStep(4)">④ BGM</div>
+            <div class="step-tab disabled" data-step="5" onclick="showStep(5)">⑤ トークテーマ</div>
         </div>
 
-        <button onclick="runTelop()" id="telopBtn">テロップを生成</button>
-        <div class="opts">
-            <select id="whisperModel">
-                <option value="small" selected>精度: 標準(small)</option>
-                <option value="medium">精度: 高(medium・遅い)</option>
-            </select>
+        <div class="step-content active" data-step="1">
+            <button onclick="runJumpCut()" id="jumpCutBtn">ジャンプカットを実行</button>
+            <div class="opts">
+                <select id="jumpCutPreset">
+                    <option value="interview" selected>インタビュー・対談動画(0.5秒以上→0.2秒残す)</option>
+                    <option value="presentation">プレゼン・解説動画(0.3秒以上→0.1秒に短縮)</option>
+                    <option value="vlog">Vlog・日常系動画(1.0秒以上→0.3秒に詰める)</option>
+                </select>
+            </div>
         </div>
 
-        <input type="file" id="mediaFile" accept="video/*,image/*,audio/*" onchange="onFileChosen()">
-        <button onclick="document.getElementById('mediaFile').click()">メディアを選んで挿入</button>
-        <div class="file-label" id="fileLabel">(未選択)</div>
+        <div class="step-content" data-step="2">
+            <button onclick="runTelop()" id="telopBtn">テロップを生成</button>
+            <div class="opts">
+                <select id="whisperModel">
+                    <option value="small" selected>精度: 標準(small)</option>
+                    <option value="medium">精度: 高(medium・遅い)</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="step-content" data-step="3">
+            <div class="file-label" style="margin-bottom:10px;">
+                生成したキャプションにデザインを当てる場合は、Premiereでキャプショントラックを選択し
+                「キャプションをグラフィックに変換」を実行、下の一覧から好きなスタイルを選んでください
+                (自動化パネルからは適用しません・参考表示のみ)。
+            </div>
+            <div class="style-grid" id="styleGrid">
+                <div class="style-empty">読み込み中…</div>
+            </div>
+        </div>
+
+        <div class="step-content" data-step="4">
+            <div class="coming-soon">準備中です。<br>BGMを動画の尺に自動フィットする機能は今後追加予定です。</div>
+        </div>
+
+        <div class="step-content" data-step="5">
+            <div class="coming-soon">準備中です。<br>話している内容から見出しを自動生成する機能は今後追加予定です。</div>
+        </div>
     </section>
 
     <section class="panel">
-        <div class="status-row">
-            <span style="font-size:12px;color:var(--text-1);">テロップスタイル一覧(参考・自動適用はされません)</span>
-        </div>
-        <div class="style-grid" id="styleGrid">
-            <div class="style-empty">読み込み中…</div>
-        </div>
+        <input type="file" id="mediaFile" accept="video/*,image/*,audio/*" onchange="onFileChosen()">
+        <button onclick="document.getElementById('mediaFile').click()">メディアを選んで挿入</button>
+        <div class="file-label" id="fileLabel">(未選択)</div>
     </section>
 
     <section class="panel">

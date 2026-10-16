@@ -208,6 +208,15 @@
         }
     };
 
+    window.showStep = function (n) {
+        document.querySelectorAll('.step-tab').forEach(function (el) {
+            el.classList.toggle('active', Number(el.dataset.step) === n);
+        });
+        document.querySelectorAll('.step-content').forEach(function (el) {
+            el.classList.toggle('active', Number(el.dataset.step) === n);
+        });
+    };
+
     document.addEventListener('DOMContentLoaded', function () {
         checkHealth();
         setInterval(checkHealth, 4000);
