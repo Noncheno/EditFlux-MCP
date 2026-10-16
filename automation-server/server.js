@@ -543,7 +543,10 @@ function scriptImportAndCreateCaptionTrack(srtPath) {
       }
       if (!newItem) return JSON.stringify({ success: false, error: 'インポートされたSRTのプロジェクト項目が見つかりません' });
 
-      var created = seq.createCaptionTrack(newItem, 0);
+      // フォーマット省略時(2引数呼び出し)はPremiereが608/708などの放送用キャプション形式を
+      // 既定にすることがあり、その場合は固定文字グリッドでこちら側の改行を無視して
+      // 再折り返しされてしまう(例: 2行のつもりが3行になる)。字幕用の自由形式を明示する。
+      var created = seq.createCaptionTrack(newItem, 0, Sequence.CAPTION_FORMAT_SUBTITLE);
       app.project.save();
       return JSON.stringify({ success: true, created: !!created, itemId: newItem.nodeId, itemName: newItem.name });
     } catch (e) { return JSON.stringify({ success: false, error: String(e) }); }
