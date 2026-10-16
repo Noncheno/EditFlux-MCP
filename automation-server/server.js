@@ -944,21 +944,25 @@ function findBreakPoints(s) {
   return Array.from(points).sort((a, b) => a - b);
 }
 
-// 1行16文字・最大2行(合計32文字)に収める。収まらない場合は複数のテロップカードに
+// 1行maxCharsPerLine文字・最大2行に収める。収まらない場合は複数のテロップカードに
 // 分割する(文字を削って情報を失うより、カードを増やして尺を分け合う方を優先する)。
+// maxCharsPerLineの実際に安全な値はシーケンスの解像度・キャプションのフォントサイズに
+// 依存するため(例: 縦型/狭い解像度だと16文字でもPremiere側がさらに折り返してしまう)、
+// 呼び出し側(パネルのUI)から調整できるようにしている。
 // 戻り値: [{ text: '1〜2行(\\nで改行)', charCount: number }]
-function wrapTelopText(text) {
+function wrapTelopText(text, maxCharsPerLine) {
+  const maxChars = maxCharsPerLine && maxCharsPerLine > 0 ? maxCharsPerLine : TELOP_MAX_CHARS_PER_LINE;
   function wrapLine(s) {
     const lines = [];
     let rest = s;
     while (rest.length > 0) {
-      if (rest.length <= TELOP_MAX_CHARS_PER_LINE) { lines.push(rest); break; }
-      const breakPoints = findBreakPoints(rest).filter((p) => p > 0 && p <= TELOP_MAX_CHARS_PER_LINE);
+      if (rest.length <= maxChars) { lines.push(rest); break; }
+      const breakPoints = findBreakPoints(rest).filter((p) => p > 0 && p <= maxChars);
       // 行の後半(文字数の半分以降)にある最も右寄りの切れ目を優先。早すぎる位置で切って
       // 行が不自然に短くなるのを避ける。見つからなければ文字数いっぱいで機械的に切る。
-      const nearEnd = breakPoints.filter((p) => p >= Math.ceil(TELOP_MAX_CHARS_PER_LINE / 2));
+      const nearEnd = breakPoints.filter((p) => p >= Math.ceil(maxChars / 2));
       let cut = nearEnd.length > 0 ? nearEnd[nearEnd.length - 1]
-        : (breakPoints.length > 0 ? breakPoints[breakPoints.length - 1] : TELOP_MAX_CHARS_PER_LINE);
+        : (breakPoints.length > 0 ? breakPoints[breakPoints.length - 1] : maxChars);
       lines.push(rest.slice(0, cut).trim());
       rest = rest.slice(cut).trim();
     }
@@ -1126,6 +1130,7 @@ async function workflowTelop(opts) {
   const language = opts.language || 'ja';
   const model = opts.model || 'small';
   const scenarioText = opts.script ? String(opts.script).trim() : '';
+  const maxCharsPerLine = opts.maxCharsPerLine && opts.maxCharsPerLine > 0 ? opts.maxCharsPerLine : TELOP_MAX_CHARS_PER_LINE;
 
   const info = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO);
   const clips = (info.audio && info.audio[0] && info.audio[0].clips) || [];
@@ -1165,7 +1170,7 @@ async function workflowTelop(opts) {
   const timelineCaptions = [];
   for (const cap of rawCaptions) {
     const text = stripPunctuation(cap.text);
-    const wrapped = wrapTelopText(text);
+    const wrapped = wrapTelopText(text, maxCharsPerLine);
     if (wrapped.length === 0) continue;
     const totalChars = wrapped.reduce((sum, w) => sum + w.text.replace(/\n/g, '').length, 0) || 1;
     const duration = cap.end - cap.start;
@@ -1192,6 +1197,7 @@ async function workflowTelop(opts) {
     srtPath: srtPath,
     captionTrackCreated: result.created,
     usedScenario: usedScenario,
+    maxCharsPerLine: maxCharsPerLine,
     note: usedScenario
       ? 'シナリオ本文を音声のタイミングに合わせて配置しました(Whisperの認識テキストは使用していません)。必要ならPremiereの「キャプションをグラフィックに変換」でお好みのスタイルに変えてください。'
       : '既定のキャプションスタイルで追加されました。必要ならPremiereの「キャプションをグラフィックに変換」でお好みのスタイルに変えてください。'

@@ -180,6 +180,17 @@
                     <option value="small" selected>精度: 標準(small)</option>
                     <option value="medium">精度: 高(medium・遅い)</option>
                 </select>
+                <select id="telopMaxChars">
+                    <option value="8">1行8文字(縦型・狭い動画向け)</option>
+                    <option value="10">1行10文字</option>
+                    <option value="12" selected>1行12文字</option>
+                    <option value="14">1行14文字</option>
+                    <option value="16">1行16文字(横長動画向け)</option>
+                </select>
+            </div>
+            <div class="file-label" style="margin:0 0 8px;">
+                実際に何文字で折り返せるかは動画の解像度・キャプションのフォントサイズで変わる。
+                生成後に3行以上になってしまう場合は、文字数を減らしてもう一度試してほしい。
             </div>
             <div class="file-label" style="margin:10px 0 4px;">
                 シナリオ(台本)がある場合はここに貼り付けると、Whisperの認識テキストの代わりに
