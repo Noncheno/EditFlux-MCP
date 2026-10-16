@@ -174,15 +174,22 @@
         </div>
 
         <div class="step-content" data-step="2">
+            <div class="file-label" style="margin:0 0 10px; padding:8px; border:1px solid var(--panel-border); border-radius:8px;">
+                <b>おすすめの手順(書き出し不要・コピペのみ):</b><br>
+                ① Premiereの「文字起こし」で書き起こし、聞きながらその場で誤字を直す<br>
+                ② Text(テキスト)パネルの文字を全選択してコピー(ファイル保存は不要)<br>
+                ③ 下の「シナリオ」欄に貼り付け<br>
+                ④ 下の「テロップを生成」ボタンを押す(Whisperはタイミング取得にのみ使い、
+                表示される文字は②で直した正しいテキストの方を使うので脱字の心配なし)
+            </div>
             <button class="secondary" onclick="runTelopRefine()" id="telopRefineBtn">
-                Premiereの文字起こしを整形(推奨・書き出し不要)
+                Premiereの文字起こしを自動読み取り(実験的・失敗することがあります)
             </button>
             <div class="file-label" style="margin:-4px 0 10px;">
-                先にPremiereの「文字起こし」(Text/テキストパネル → シーケンスを文字起こし)で
-                書き起こし、聞きながらその場で誤字を直してから、このボタンを押す。
-                SRTの書き出しは不要(読み取れた場合のみ)。読み取れない場合はエラーで案内する。
+                上のおすすめ手順を使わず、コピペもせずに自動で読み取れないか試す(Premiereに
+                キャプションを読む公式機能が無いため、環境によっては失敗する)。
             </div>
-            <button onclick="runTelop()" id="telopBtn">テロップを生成(Whisper・自動文字起こし)</button>
+            <button onclick="runTelop()" id="telopBtn">テロップを生成(Whisper)</button>
             <div class="opts">
                 <select id="whisperModel">
                     <option value="small" selected>精度: 標準(small)</option>
