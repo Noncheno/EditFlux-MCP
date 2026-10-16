@@ -181,6 +181,11 @@
                     <option value="medium">精度: 高(medium・遅い)</option>
                 </select>
             </div>
+            <div class="file-label" style="margin:10px 0 4px;">
+                シナリオ(台本)がある場合はここに貼り付けると、Whisperの認識テキストの代わりに
+                この本文を音声のタイミングに合わせて配置します(脱字・誤認識対策)。空欄ならWhisperの認識結果をそのまま使います。
+            </div>
+            <textarea id="telopScript" placeholder="(任意) シナリオ本文を貼り付け" style="width:100%; min-height:70px; resize:vertical; background:rgba(9,17,25,0.72); color:var(--text-0); border:1px solid var(--panel-border); border-radius:8px; padding:6px; font-size:11px; margin-bottom:8px;"></textarea>
             <div class="file-label" style="margin:10px 0;">
                 デザインを当てる場合は、生成後にPremiereでキャプショントラックを選択し
                 「キャプションをグラフィックに変換」を実行、下の一覧から好きなスタイルを選んでください

@@ -1076,9 +1076,53 @@ function writeSrt(captions, outPath) {
   fs.writeFileSync(outPath, lines.join('\n'), 'utf8');
 }
 
+// Whisperの文字起こし結果は脱字・誤認識が出やすいが、タイミング(各セグメントの開始/終了)は
+// おおむね信頼できる。ユーザーが正確な台本(シナリオ)を貼り付けた場合は、認識テキストは使わず
+// タイミングの枠だけ借りて、台本の文字を文字数×時間比で配分し直す。
+// segments: タイムライン時間に変換済みの {start, end} の配列 (start昇順)。
+function alignScriptToSegments(scriptText, segments) {
+  const text = String(scriptText)
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join('');
+  const totalChars = text.length;
+  if (totalChars === 0 || segments.length === 0) return [];
+
+  const totalDuration = segments.reduce((sum, s) => sum + Math.max(0, s.end - s.start), 0);
+  if (totalDuration <= 0) return [];
+
+  const breakPoints = findBreakPoints(text);
+  const chunks = [];
+  let cursorChar = 0;
+  let cumDuration = 0;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    cumDuration += Math.max(0, seg.end - seg.start);
+    const isLast = i === segments.length - 1;
+    let targetChar = isLast ? totalChars : Math.round(totalChars * (cumDuration / totalDuration));
+    if (!isLast) {
+      let best = targetChar;
+      let bestDist = Infinity;
+      for (const bp of breakPoints) {
+        if (bp <= cursorChar) continue;
+        const d = Math.abs(bp - targetChar);
+        if (d < bestDist) { bestDist = d; best = bp; }
+      }
+      targetChar = Math.max(cursorChar + 1, Math.min(best, totalChars - 1));
+    }
+    const chunkText = text.slice(cursorChar, targetChar).trim();
+    if (chunkText.length > 0) chunks.push({ start: seg.start, end: seg.end, text: chunkText });
+    cursorChar = targetChar;
+  }
+  return chunks;
+}
+
 async function workflowTelop(opts) {
   const language = opts.language || 'ja';
   const model = opts.model || 'small';
+  const scenarioText = opts.script ? String(opts.script).trim() : '';
 
   const info = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO);
   const clips = (info.audio && info.audio[0] && info.audio[0].clips) || [];
@@ -1096,9 +1140,19 @@ async function workflowTelop(opts) {
     captionsByPath[p] = await transcribeFile(p, language, model, outDir);
   }
 
-  const rawCaptions = mapIntervalsToTimeline(clips, captionsByPath, (iv) => ({ text: iv.text }));
+  let rawCaptions = mapIntervalsToTimeline(clips, captionsByPath, (iv) => ({ text: iv.text }));
   if (rawCaptions.length === 0) {
     return { success: true, message: '音声から文字を検出できませんでした。', sequenceName: info.name, captions: 0 };
+  }
+  rawCaptions.sort((a, b) => a.start - b.start);
+
+  let usedScenario = false;
+  if (scenarioText.length > 0) {
+    const aligned = alignScriptToSegments(scenarioText, rawCaptions.map((c) => ({ start: c.start, end: c.end })));
+    if (aligned.length > 0) {
+      rawCaptions = aligned;
+      usedScenario = true;
+    }
   }
 
   // キャプショントラックはMOGRTインポートより大幅に軽く、ユーザーが後で手動で
@@ -1134,7 +1188,10 @@ async function workflowTelop(opts) {
     captions: timelineCaptions.length,
     srtPath: srtPath,
     captionTrackCreated: result.created,
-    note: '既定のキャプションスタイルで追加されました。必要ならPremiereの「キャプションをグラフィックに変換」でお好みのスタイルに変えてください。'
+    usedScenario: usedScenario,
+    note: usedScenario
+      ? 'シナリオ本文を音声のタイミングに合わせて配置しました(Whisperの認識テキストは使用していません)。必要ならPremiereの「キャプションをグラフィックに変換」でお好みのスタイルに変えてください。'
+      : '既定のキャプションスタイルで追加されました。必要ならPremiereの「キャプションをグラフィックに変換」でお好みのスタイルに変えてください。'
   };
 }
 
