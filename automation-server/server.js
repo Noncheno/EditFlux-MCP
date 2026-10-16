@@ -291,6 +291,145 @@ function scriptApplyJumpCuts(silenceRanges) {
   })();`;
 }
 
+// qe.razor()は見た目上エラーを出さずに終わっても、実際にはクリップを分割しないことがある
+// (環境依存の既知の問題)。その場合のフォールバック: 各トラックの元クリップを一旦すべて削除し、
+// 無音を除いた「残す区間」だけをoverwriteClipで先頭から詰めて敷き直す。
+// 前提: 各トラックに元のソースクリップが1本だけ乗っている状態(カット前の生素材)であること。
+// 既に複数クリップに分かれているトラックでは、そのトラックの最初のクリップのメディアだけで
+// 埋め直してしまうため正しく動作しない。
+function scriptApplyJumpCutsReinsert(silenceRanges) {
+  const silencesJSON = JSON.stringify(silenceRanges);
+  return `(function(){
+    try {
+      var silences = ${silencesJSON};
+      var seq = app.project.activeSequence;
+      if (!seq) return JSON.stringify({ success: false, error: 'アクティブなシーケンスがありません' });
+
+      var durSecs = seq.end.seconds;
+      var tps = 0;
+      if (durSecs > 0) {
+        var durTicks = parseFloat(String(seq.end.ticks));
+        if (!isNaN(durTicks) && durTicks > 0) tps = durTicks / durSecs;
+      }
+      var allTracksForTps = [];
+      for (var ti = 0; ti < seq.videoTracks.numTracks; ti++) allTracksForTps.push(seq.videoTracks[ti]);
+      for (var ti = 0; ti < seq.audioTracks.numTracks; ti++) allTracksForTps.push(seq.audioTracks[ti]);
+      if (tps <= 0) {
+        for (var ti = 0; ti < allTracksForTps.length && tps <= 0; ti++) {
+          var track = allTracksForTps[ti];
+          for (var ci = 0; ci < track.clips.numItems && tps <= 0; ci++) {
+            var c = track.clips[ci];
+            var cSec = c.duration.seconds;
+            var cTicks = parseFloat(String(c.duration.ticks));
+            if (cSec > 0 && !isNaN(cTicks) && cTicks > 0) tps = cTicks / cSec;
+          }
+        }
+      }
+      if (tps <= 0) return JSON.stringify({ success: false, error: 'シーケンスのticks-per-secondを特定できませんでした' });
+      if (!durSecs || durSecs <= 0) {
+        for (var ti = 0; ti < allTracksForTps.length; ti++) {
+          var track = allTracksForTps[ti];
+          for (var ci = 0; ci < track.clips.numItems; ci++) {
+            var cEnd = track.clips[ci].end.seconds;
+            if (cEnd > durSecs) durSecs = cEnd;
+          }
+        }
+      }
+      if (!durSecs || durSecs <= 0) return JSON.stringify({ success: false, error: 'シーケンスの長さを特定できませんでした' });
+
+      var silList = silences.slice().sort(function(a, b) { return a.start - b.start; });
+      var merged = [];
+      for (var i = 0; i < silList.length; i++) {
+        var s = silList[i];
+        if (merged.length && s.start <= merged[merged.length - 1].end) {
+          if (s.end > merged[merged.length - 1].end) merged[merged.length - 1].end = s.end;
+        } else {
+          merged.push({ start: s.start, end: s.end });
+        }
+      }
+      var keep = [];
+      var cursor = 0;
+      for (var i = 0; i < merged.length; i++) {
+        if (merged[i].start > cursor) keep.push({ start: cursor, end: merged[i].start });
+        cursor = Math.max(cursor, merged[i].end);
+      }
+      if (cursor < durSecs) keep.push({ start: cursor, end: durSecs });
+      var keepFiltered = [];
+      for (var i = 0; i < keep.length; i++) {
+        if ((keep[i].end - keep[i].start) > 0.02) keepFiltered.push(keep[i]);
+      }
+      keep = keepFiltered;
+
+      var origVideo = [];
+      for (var ti = 0; ti < seq.videoTracks.numTracks; ti++) {
+        var tV = seq.videoTracks[ti];
+        origVideo.push(tV.clips.numItems > 0 ? { pi: tV.clips[0].projectItem, srcOffset: tV.clips[0].inPoint.seconds } : null);
+      }
+      var origAudio = [];
+      for (var ti = 0; ti < seq.audioTracks.numTracks; ti++) {
+        var tA = seq.audioTracks[ti];
+        origAudio.push(tA.clips.numItems > 0 ? { pi: tA.clips[0].projectItem, srcOffset: tA.clips[0].inPoint.seconds } : null);
+      }
+
+      function insertKeepClips(track, pi, srcOffset) {
+        var placed = 0, failed = 0;
+        var posSec = 0;
+        for (var i = 0; i < keep.length; i++) {
+          var k = keep[i];
+          var srcStart = srcOffset + k.start;
+          var srcEnd = srcOffset + k.end;
+          try {
+            pi.setInPoint(srcStart, 4);
+            pi.setOutPoint(srcEnd, 4);
+            var posTicks = String(Math.round(posSec * tps));
+            track.overwriteClip(pi, posTicks);
+            placed++;
+          } catch (e) { failed++; }
+          posSec += (k.end - k.start);
+        }
+        return { placed: placed, failed: failed, total: keep.length };
+      }
+
+      function clearTrack(track) {
+        var removed = 0;
+        for (var ci = track.clips.numItems - 1; ci >= 0; ci--) {
+          try { track.clips[ci].remove(false, true); removed++; } catch (_) {}
+        }
+        return removed;
+      }
+
+      for (var ti = 0; ti < seq.videoTracks.numTracks; ti++) clearTrack(seq.videoTracks[ti]);
+      for (var ti = 0; ti < seq.audioTracks.numTracks; ti++) clearTrack(seq.audioTracks[ti]);
+
+      var results = { video: [], audio: [] };
+      for (var ti = 0; ti < seq.videoTracks.numTracks; ti++) {
+        var oV = origVideo[ti];
+        results.video.push(oV ? insertKeepClips(seq.videoTracks[ti], oV.pi, oV.srcOffset) : { skipped: true });
+      }
+      for (var ti = 0; ti < seq.audioTracks.numTracks; ti++) {
+        var oA = origAudio[ti];
+        results.audio.push(oA ? insertKeepClips(seq.audioTracks[ti], oA.pi, oA.srcOffset) : { skipped: true });
+      }
+
+      var strayRemoved = 0;
+      for (var ti = 0; ti < seq.videoTracks.numTracks; ti++) {
+        if (!origVideo[ti]) strayRemoved += clearTrack(seq.videoTracks[ti]);
+      }
+      for (var ti = 0; ti < seq.audioTracks.numTracks; ti++) {
+        if (!origAudio[ti]) strayRemoved += clearTrack(seq.audioTracks[ti]);
+      }
+
+      return JSON.stringify({
+        success: true,
+        keepRegionCount: keep.length,
+        results: results,
+        strayRemoved: strayRemoved,
+        finalDurationSec: seq.end.seconds
+      });
+    } catch (e) { return JSON.stringify({ success: false, error: String(e) }); }
+  })();`;
+}
+
 function scriptImportAndCreateCaptionTrack(srtPath) {
   return `(function(){
     try {
@@ -559,20 +698,40 @@ async function workflowJumpCut(opts) {
     };
   }
 
-  const result = await evalJSON(scriptApplyJumpCuts(timelineSilences));
+  const razorResult = await evalJSON(scriptApplyJumpCuts(timelineSilences));
+  if (razorResult.error) throw new Error(razorResult.error);
+
+  const razorDeletedTotal = (razorResult.deletedVideo || 0) + (razorResult.deletedAudio || 0);
+  let method = 'razor';
+  let finalResult = razorResult;
+
+  if (razorDeletedTotal === 0) {
+    // qe.razor()が見た目上成功しても実際には分割していない環境向けのフォールバック。
+    const reinsertResult = await evalJSON(scriptApplyJumpCutsReinsert(timelineSilences), 300000);
+    if (reinsertResult.error) throw new Error(reinsertResult.error);
+    method = 'reinsert';
+    finalResult = reinsertResult;
+  }
+
   await evalJSON(SCRIPT_SAVE);
 
-  return {
+  const base = {
     success: true,
     sequenceName: info.name,
     preset: opts.preset || null,
     minDurationSec: minDurSec,
     residualSec: residualSec,
     cuts: timelineSilences.length,
-    deletedVideoClips: result.deletedVideo,
-    deletedAudioClips: result.deletedAudio,
-    finalDurationSec: result.finalDurationSec
+    method: method,
+    finalDurationSec: finalResult.finalDurationSec
   };
+  if (method === 'razor') {
+    base.deletedVideoClips = finalResult.deletedVideo;
+    base.deletedAudioClips = finalResult.deletedAudio;
+  } else {
+    base.keepRegions = finalResult.keepRegionCount;
+  }
+  return base;
 }
 
 function formatSrtTime(seconds) {
