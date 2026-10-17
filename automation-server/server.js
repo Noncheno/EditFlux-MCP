@@ -1797,6 +1797,17 @@ function scriptInsertBrollPlan(plan) {
               var endTime = new Time();
               endTime.seconds = it.start + it.duration;
               newClip.end = endTime;
+              // インサート素材は映像のみでよいので、リンクされた音声クリップ(自動で
+              // 音声トラックに配置されていた場合)は削除する。
+              try {
+                var linked = newClip.getLinkedItems ? newClip.getLinkedItems() : null;
+                if (linked) {
+                  for (var li = 0; li < linked.length; li++) {
+                    var litem = linked[li];
+                    if (litem !== newClip) { try { litem.remove(false, false); } catch (eRmLink) {} }
+                  }
+                }
+              } catch (eLink) {}
             } catch (eTrim) {}
           } else {
             errors.push(it.filePath + ': 配置失敗');
