@@ -52,8 +52,9 @@
     }
 
     function setButtonsEnabled(enabled) {
-        ['jumpCutBtn', 'insertBrollBtn'].forEach(function (id) {
+        ['jumpCutBtn', 'insertBrollBtn', 'packageBtn'].forEach(function (id) {
             var btn = document.getElementById(id);
+            if (id === 'packageBtn' && pkgTimer) return;  // 作成中は押せないままにする
             if (btn) btn.disabled = !enabled;
         });
     }
@@ -184,19 +185,89 @@
         }
     };
 
-    window.onFileChosen = async function () {
-        var input = document.getElementById('mediaFile');
-        var file = input.files && input.files[0];
-        if (!file) return;
-        var filePath = file.path;
-        document.getElementById('fileLabel').textContent = filePath;
-        log('メディアを挿入中: ' + filePath, 'info');
-        try {
-            var result = await fetchJSON('/insert-media', 'POST', { filePath: filePath });
-            log('挿入完了: "' + result.itemName + '" (' + result.method + ')', 'ok');
-        } catch (e) {
-            log('挿入失敗: ' + e.message, 'error');
+    // ───── ⑥ 編集パッケージ ─────
+    var PKG_FIELDS = ['pkgTitle', 'pkgChannel', 'pkgBgm', 'pkgSfx'];
+    var pkgTimer = null;
+
+    function restorePackageFields() {
+        PKG_FIELDS.forEach(function (id) {
+            try {
+                var v = localStorage.getItem('editflux.' + id);
+                if (v) document.getElementById(id).value = v;
+            } catch (e) {}
+        });
+    }
+
+    function savePackageFields() {
+        PKG_FIELDS.forEach(function (id) {
+            try { localStorage.setItem('editflux.' + id, document.getElementById(id).value); } catch (e) {}
+        });
+    }
+
+    function setPackageRunning(running) {
+        document.getElementById('packageBtn').disabled = running;
+        document.getElementById('packageCancelBtn').style.display = running ? 'block' : 'none';
+    }
+
+    function fmtSec(s) {
+        return Math.floor(s / 60) + '分' + (s % 60) + '秒';
+    }
+
+    async function pollPackage() {
+        var st;
+        try { st = await fetchJSON('/package/status', 'GET'); } catch (e) { return; }
+        var box = document.getElementById('pkgProgress');
+        if (st.state === 'running' || st.state === 'importing') {
+            setPackageRunning(true);
+            var last = (st.log || []).filter(function (l) { return !/^\s*[{}"]/.test(l); }).slice(-3).join('\n');
+            box.textContent = '作成中… ' + fmtSec(st.elapsedSec) + '経過\n' + last;
+            return;
         }
+        clearInterval(pkgTimer);
+        pkgTimer = null;
+        setPackageRunning(false);
+        if (st.state === 'done') {
+            var s = st.summary || {}, imp = st.importResult || {};
+            box.textContent = '完成しました(' + fmtSec(st.elapsedSec) + ')\n保存先: ' + st.root;
+            log('編集パッケージ完成: シーケンス「' + (imp.name || s['シーケンス名']) + '」を読み込みました / カット' + s['V1/A1カット数'] +
+                ' / テロップ' + s['V2通常テロップ数'] + '(強調' + s['V3強調テロップ数'] + ') / BGM ' + s['BGM'] +
+                ' / 効果音' + (s['効果音'] || []).length + ' / XML検証: ' + s['検証'] +
+                ' / Premiereでの数の一致: ' + (imp.countsMatch ? 'OK' : '要確認'), 'ok');
+            log('仕上げ: V2・V3のテロップを全選択して、テキストスタイル(背景の帯・中央揃え)を一括で当ててください', 'info');
+        } else if (st.state === 'error') {
+            box.textContent = '失敗しました: ' + st.error;
+            log('編集パッケージの作成に失敗: ' + st.error, 'error');
+        } else if (st.state === 'canceled') {
+            box.textContent = '中止しました';
+        }
+    }
+
+    window.runPackage = async function () {
+        savePackageFields();
+        var mode = document.querySelector('input[name="pkgMode"]:checked');
+        var body = {
+            title: document.getElementById('pkgTitle').value.trim(),
+            channel: document.getElementById('pkgChannel').value.trim(),
+            bgm: document.getElementById('pkgBgm').value.trim(),
+            sfx: document.getElementById('pkgSfx').value.trim(),
+            script: document.getElementById('pkgScript').value,
+            mode: mode ? mode.value : 'natural',
+            misspeak: document.getElementById('pkgMisspeak').checked
+        };
+        try {
+            var r = await fetchJSON('/package/start', 'POST', body);
+            log('編集パッケージの作成を開始しました(20〜30分): ' + r.video, 'info');
+            setPackageRunning(true);
+            if (!pkgTimer) pkgTimer = setInterval(pollPackage, 3000);
+            pollPackage();
+        } catch (e) {
+            log('開始できませんでした: ' + e.message, 'error');
+        }
+    };
+
+    window.cancelPackage = async function () {
+        try { await fetchJSON('/package/cancel', 'POST', {}); log('編集パッケージの作成を中止しました', 'info'); }
+        catch (e) { log('中止に失敗: ' + e.message, 'error'); }
     };
 
     window.showStep = function (n) {
@@ -211,5 +282,13 @@
     document.addEventListener('DOMContentLoaded', function () {
         checkHealth();
         setInterval(checkHealth, 4000);
+        restorePackageFields();
+        // パネルを開き直したときに、作成中のジョブがあれば進み具合の表示を再開する
+        fetchJSON('/package/status', 'GET').then(function (st) {
+            if (st.state === 'running' || st.state === 'importing') {
+                pkgTimer = setInterval(pollPackage, 3000);
+                pollPackage();
+            }
+        }).catch(function () {});
     });
 })();

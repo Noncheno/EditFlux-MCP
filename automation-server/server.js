@@ -2137,7 +2137,204 @@ function readBody(req) {
   });
 }
 
+// ───────────────────────── 編集パッケージ(⑥) ─────────────────────────
+// Claude Codeのスキル premiere-xml-package と同じPythonスクリプト(automation-server/package/)を
+// 子プロセスで動かし、カット・テロップ・タイトル・BGM・効果音入りのFCP7 XMLパッケージを作る。
+// 1本20〜30分かかるので、HTTPリクエストは開始だけ返し、進み具合は /package/status で取りに来てもらう。
+// 完成したらXMLをPremiereに読み込み、トラックごとの数がパッケージの集計と一致するか確かめる。
+const PACKAGE_SCRIPT = path.join(__dirname, 'package', 'make_package.py');
+let packageJob = null;
+
+function expandHome(p) {
+  if (!p) return p;
+  return p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p;
+}
+
+const SCRIPT_PROJECT_PATH = `(function(){
+  try { return JSON.stringify({ success: true, path: app.project.path || '' }); }
+  catch (e) { return JSON.stringify({ success: false, error: String(e) }); }
+})();`;
+
+function scriptImportPackageXml(xmlPath, seqName) {
+  return `(function(){
+    try {
+      // app.project.sequences は作成順ではなくID順に並ぶ(実機確認)ので、読み込み前のIDを控えておき、
+      // 読み込み後に増えたIDのシーケンスを探す
+      var beforeIds = {};
+      for (var b0 = 0; b0 < app.project.sequences.numSequences; b0++) beforeIds[app.project.sequences[b0].sequenceID] = 1;
+      var ok = app.project.importFiles([${esc(xmlPath)}], true, app.project.rootItem, false);
+      var seq = null;
+      for (var tries = 0; tries < 20 && !seq; tries++) {
+        for (var i = 0; i < app.project.sequences.numSequences; i++) {
+          var cand = app.project.sequences[i];
+          if (!beforeIds[cand.sequenceID] && cand.name === ${esc(seqName)}) { seq = cand; break; }
+        }
+        if (!seq) { try { $.sleep(500); } catch (eS) {} }
+      }
+      if (!seq) return JSON.stringify({ success: false, error: 'XMLを読み込みましたが、シーケンスが見つかりませんでした(importFiles=' + ok + ')' });
+      try { app.project.activeSequence = seq; } catch (eA) {}
+      try { if (seq.openInTimeline) seq.openInTimeline(); } catch (eO) {}
+      var V = [], A = [];
+      for (var t = 0; t < seq.videoTracks.numTracks; t++) V.push(seq.videoTracks[t].clips.numItems);
+      for (var t2 = 0; t2 < seq.audioTracks.numTracks; t2++) A.push(seq.audioTracks[t2].clips.numItems);
+      var v1 = seq.videoTracks[0], a1 = seq.audioTracks[0], linked = 0, match = 0;
+      for (var c = 0; c < v1.clips.numItems; c++) {
+        var vc = v1.clips[c], ac = a1.clips[c];
+        try { if (vc.getLinkedItems().numItems === 2) linked++; } catch (eL) {}
+        if (ac && Math.abs(ac.start.seconds - vc.start.seconds) < 0.001 && Math.abs(ac.end.seconds - vc.end.seconds) < 0.001
+            && Math.abs(ac.inPoint.seconds - vc.inPoint.seconds) < 0.001) match++;
+      }
+      var keys = 0;
+      try {
+        var b = seq.audioTracks[1].clips[0];
+        for (var k = 0; k < b.components.numItems; k++) {
+          var cp = b.components[k];
+          if (cp.displayName === 'Volume') {
+            for (var q = 0; q < cp.properties.numItems; q++) {
+              if (cp.properties[q].displayName === 'Level') { try { keys = cp.properties[q].getKeys().length; } catch (eK) {} }
+            }
+          }
+        }
+      } catch (eB) {}
+      var st = seq.getSettings();
+      return JSON.stringify({ success: true, name: seq.name, width: st.videoFrameWidth, height: st.videoFrameHeight,
+        V: V, A: A, v1Linked: linked, v1a1Match: match, bgmKeyframes: keys });
+    } catch (e) { return JSON.stringify({ success: false, error: String(e) }); }
+  })();`;
+}
+
+function writeImportLog(root, summary, imp) {
+  const lines = ['Premiere Pro 実機読み込みテスト(EditFlux パネルから自動実行)', '='.repeat(40), ''];
+  if (!imp || !imp.success) {
+    lines.push('構造検証済み。', 'Premiere Pro実機読み込み: 失敗 ' + ((imp && imp.error) || ''));
+  } else {
+    const exp = {
+      V1: summary['V1/A1カット数'], V2: summary['V2通常テロップ数'], V3: summary['V3強調テロップ数'], V4: 1,
+      A1: summary['V1/A1カット数']
+    };
+    const got = { V1: imp.V[0], V2: imp.V[1], V3: imp.V[2], V4: imp.V[3], A1: imp.A[0] };
+    const okCounts = Object.keys(exp).every((k) => exp[k] === got[k]);
+    lines.push(`Premiere Pro 実機で読み込み確認済み(${new Date().toLocaleString('ja-JP')})。`, '',
+      `シーケンス「${imp.name}」(${imp.width}×${imp.height})`,
+      `V: ${imp.V.join(' / ')}   A: ${imp.A.join(' / ')}`,
+      `集計との一致: ${okCounts ? 'すべて一致' : '不一致あり ' + JSON.stringify({ 期待: exp, 実際: got })}`,
+      `V1とA1の相互リンク: ${imp.v1Linked}/${imp.V[0]}  編集点の一致: ${imp.v1a1Match}/${imp.V[0]}`,
+      `A2(BGM)の音量キーフレーム: ${imp.bgmKeyframes}個`, '',
+      '■ Premiere上で手作業が必要な項目',
+      '・テロップの背景の帯は表示されない(XMLの背景指定は反映されない)',
+      '・XML内alignment=centerは設定済みだが、Premiere上の段落中央揃えは反映されない',
+      '  (1行テロップはほぼ中央、2行テロップは2行目の左端が1行目にそろう)',
+      '→ V2/V3のテロップを全選択し、保存済みのテキストスタイルを一括適用して整える');
+    imp.countsMatch = okCounts;
+  }
+  fs.writeFileSync(path.join(root, 'Logs', 'premiere_import_test.txt'), lines.join('\n') + '\n');
+}
+
+async function startPackageJob(opts) {
+  if (packageJob && (packageJob.state === 'running' || packageJob.state === 'importing')) {
+    throw new Error('編集パッケージを作成中です。終わるまでお待ちください。');
+  }
+  for (const [k, label] of [['title', '動画タイトル'], ['channel', 'チャンネル名'], ['bgm', 'BGM'], ['sfx', '効果音']]) {
+    if (!opts[k] || !String(opts[k]).trim()) throw new Error(`${label}を入力してください。`);
+  }
+  for (const k of ['bgm', 'sfx']) {
+    if (!fs.existsSync(expandHome(opts[k]))) throw new Error(`見つかりません: ${opts[k]}`);
+  }
+  if (!fs.existsSync(PACKAGE_SCRIPT)) throw new Error(`パッケージ作成スクリプトが見つかりません: ${PACKAGE_SCRIPT}`);
+
+  const info = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO);
+  const clips = (info.audio && info.audio[0] && info.audio[0].clips) || [];
+  const paths = uniqueMediaPaths(clips);
+  if (paths.length === 0) throw new Error('アクティブなシーケンスのA1に動画がありません。');
+  if (paths.length > 1) throw new Error('A1に複数の動画があります。動画1本だけのシーケンスを開いて実行してください。');
+  const video = paths[0];
+
+  let baseDir = path.dirname(video);
+  try {
+    const pj = await evalJSON(SCRIPT_PROJECT_PATH);
+    if (pj.path) baseDir = path.dirname(pj.path);
+  } catch (e) { /* プロジェクトの場所が取れなければ動画と同じフォルダに作る */ }
+  const now = new Date();
+  const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-` +
+    `${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
+  const outDir = path.join(baseDir, `編集パッケージ_${path.parse(video).name}_${stamp}`);
+  ensureDir(outDir);
+
+  const args = [PACKAGE_SCRIPT, '--video', video, '--out', outDir, '--title', opts.title, '--channel', opts.channel,
+    '--bgm', expandHome(opts.bgm), '--sfx', expandHome(opts.sfx), '--mode', opts.mode === 'tempo' ? 'tempo' : 'natural'];
+  if (opts.script && String(opts.script).trim()) {
+    const scriptPath = path.join(outDir, '台本.txt');
+    fs.writeFileSync(scriptPath, String(opts.script));
+    args.push('--script', scriptPath);
+  }
+  if (opts.misspeak) args.push('--misspeak');
+  if (opts.maxSeconds) args.push('--max-seconds', String(opts.maxSeconds));  // 動作確認用(パネルには出していない)
+
+  const job = { state: 'running', log: [], outDir, root: path.join(outDir, 'Premiere_Export_READY'), video,
+    startedAt: Date.now(), summary: null, importResult: null, error: null, proc: null };
+  packageJob = job;
+  const proc = spawn(resolveBinary('python3'), args, { cwd: outDir, env: AUGMENTED_ENV });
+  job.proc = proc;
+  const onData = (d) => {
+    for (const line of d.toString().split('\n')) {
+      const t = line.trimEnd();
+      if (!t || /UserWarning|warnings\.warn/.test(t)) continue;
+      job.log.push(t);
+      if (job.log.length > 400) job.log.shift();
+    }
+  };
+  proc.stdout.on('data', onData);
+  proc.stderr.on('data', onData);
+  proc.on('error', (err) => { job.state = 'error'; job.error = `python3の起動に失敗: ${err.message}`; });
+  proc.on('close', async (code) => {
+    job.proc = null;
+    if (job.state === 'canceled') return;
+    const summaryPath = path.join(job.root, 'Logs', 'summary.json');
+    if ((code !== 0 && code !== 1) || !fs.existsSync(summaryPath)) {
+      job.state = 'error';
+      const msg = [...job.log].reverse().find((l) => l.startsWith('エラー: '));
+      job.error = msg ? msg.slice('エラー: '.length) : `パッケージ作成に失敗しました(終了コード ${code})。` + job.log.slice(-3).join(' / ');
+      return;
+    }
+    try {
+      job.summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'));
+      job.state = 'importing';
+      job.log.push('Premiereに読み込んで確認しています…');
+      const xml = path.join(job.root, 'Project', 'premiere_timeline.xml');
+      const imp = await evalJSON(scriptImportPackageXml(xml, job.summary['シーケンス名']), 180000);
+      job.importResult = imp;
+      writeImportLog(job.root, job.summary, imp);
+      job.state = imp.success ? 'done' : 'error';
+      if (!imp.success) job.error = 'Premiereへの読み込みに失敗しました: ' + (imp.error || '');
+    } catch (e) {
+      job.state = 'error';
+      job.error = 'Premiereへの読み込みに失敗しました: ' + e.message;
+    }
+  });
+  return { success: true, started: true, outDir, video };
+}
+
+function packageStatus() {
+  if (!packageJob) return { state: 'idle' };
+  const j = packageJob;
+  return { state: j.state, outDir: j.outDir, root: j.root, video: j.video, log: j.log.slice(-12),
+    elapsedSec: Math.round((Date.now() - j.startedAt) / 1000), summary: j.summary, importResult: j.importResult,
+    error: j.error };
+}
+
+function cancelPackageJob() {
+  if (packageJob && packageJob.proc) {
+    packageJob.state = 'canceled';
+    try { packageJob.proc.kill('SIGTERM'); } catch (e) { /* 既に終了 */ }
+    return { success: true, canceled: true };
+  }
+  return { success: true, canceled: false };
+}
+
 const ROUTES = {
+  '/package/start': { method: 'POST', handler: (body) => startPackageJob(body || {}) },
+  '/package/status': { method: 'GET', handler: async () => packageStatus() },
+  '/package/cancel': { method: 'POST', handler: async () => cancelPackageJob() },
   '/health': { method: 'GET', handler: async () => ({ ok: true, ...(await checkHealth()) }) },
   '/jump-cut': { method: 'POST', handler: (body) => workflowJumpCut(body || {}) },
   '/telop': { method: 'POST', handler: (body) => workflowTelop(body || {}) },

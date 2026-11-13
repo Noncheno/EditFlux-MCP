@@ -72,6 +72,22 @@
             padding: 6px;
             font-size: 11px;
         }
+        .field { display: block; margin-bottom: 8px; font-size: 11px; color: var(--text-1); }
+        .field input[type="text"], .field textarea {
+            display: block;
+            width: 100%;
+            box-sizing: border-box;
+            margin-top: 3px;
+            background: rgba(9,17,25,0.72);
+            color: var(--text-0);
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            padding: 6px 8px;
+            font-size: 12px;
+            font-family: inherit;
+        }
+        .field textarea { height: 90px; resize: vertical; }
+        .pkg-progress { font-size: 11px; color: var(--text-1); white-space: pre-wrap; margin-bottom: 8px; }
         .log {
             max-height: 180px;
             overflow-y: auto;
@@ -112,7 +128,7 @@
         .style-empty { font-size: 11px; color: var(--text-2); grid-column: 1 / -1; }
         .steps {
             display: flex;
-            overflow-x: auto;
+            flex-wrap: wrap;
             gap: 2px;
             margin-bottom: 10px;
             border-bottom: 1px solid var(--panel-border);
@@ -161,6 +177,7 @@
             <div class="step-tab disabled" data-step="3" onclick="showStep(3)">③ BGM</div>
             <div class="step-tab disabled" data-step="4" onclick="showStep(4)">④ トークテーマ</div>
             <div class="step-tab" data-step="5" onclick="showStep(5)">⑤ 挟み込み</div>
+            <div class="step-tab" data-step="6" onclick="showStep(6)">⑥ 編集パッケージ</div>
         </div>
 
         <div class="step-content active" data-step="1">
@@ -206,12 +223,33 @@
                 新しく追加したビデオトラックに配置される。
             </div>
         </div>
-    </section>
 
-    <section class="panel">
-        <input type="file" id="mediaFile" accept="video/*,image/*,audio/*" onchange="onFileChosen()">
-        <button onclick="document.getElementById('mediaFile').click()">メディアを選んで挿入</button>
-        <div class="file-label" id="fileLabel">(未選択)</div>
+        <div class="step-content" data-step="6">
+            <div class="file-label" style="margin:0 0 10px;">
+                開いているシーケンスのA1の動画から、ジャンプカット・テロップ(Gemini)・右上タイトル・BGM・効果音入りの
+                新しいシーケンスを作ります(FCP7 XMLで読み込み。テロップはPremiere上で文字を直せます)。
+                1本20〜30分かかります。処理中もPremiereは使えます。
+            </div>
+            <label class="field">動画タイトル<input type="text" id="pkgTitle" placeholder="例: 人は何のために生きるのか"></label>
+            <label class="field">チャンネル名<input type="text" id="pkgChannel" placeholder="例: 神河照美"></label>
+            <label class="field">BGM(ファイルかフォルダ)<input type="text" id="pkgBgm" value="~/Downloads/BGM"></label>
+            <label class="field">効果音(ファイルかフォルダ)<input type="text" id="pkgSfx" value="~/Downloads/SE(効果音）"></label>
+            <label class="field">台本(任意。貼るとテロップの表記が台本どおりになります)<textarea id="pkgScript" placeholder="台本を貼り付け(▶ 映像 などの指示が入ったままでOK)"></textarea></label>
+            <div class="opts" style="flex-direction:column; align-items:flex-start; gap:6px;">
+                <label style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-1);">
+                    <input type="radio" name="pkgMode" value="natural" checked> 間を残す(喋り終わりから1秒残す)
+                </label>
+                <label style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-1);">
+                    <input type="radio" name="pkgMode" value="tempo"> テンポ重視(間を詰める)
+                </label>
+                <label style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-1);">
+                    <input type="checkbox" id="pkgMisspeak"> 言い間違いもカットする(Geminiの使用回数が倍になります)
+                </label>
+            </div>
+            <button onclick="runPackage()" id="packageBtn">編集パッケージを作成</button>
+            <button class="secondary" onclick="cancelPackage()" id="packageCancelBtn" style="display:none;">中止</button>
+            <div class="pkg-progress" id="pkgProgress"></div>
+        </div>
     </section>
 
     <section class="panel">
