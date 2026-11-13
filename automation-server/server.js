@@ -159,6 +159,15 @@ function __qeSequenceFor(seq) {
   return __qeSequenceLookup(seq);
 }
 function __secondsToTimecode(seq, seconds) {
+  // Premiere自身のフォーマッタを優先する。29.97/23.976fpsでは自前計算だと
+  // 10分で約0.6秒ずれ、カット位置が発話にかかる/カットされない原因になるため。
+  try {
+    var settings = seq.getSettings();
+    var t = new Time();
+    t.seconds = seconds;
+    var formatted = t.getFormatted(settings.videoFrameRate, settings.videoDisplayFormat);
+    if (formatted) return formatted;
+  } catch (eFmt) {}
   var fps = seq.timebase ? (254016000000 / parseInt(seq.timebase, 10)) : 30;
   var totalFrames = Math.round(seconds * fps);
   var hours = Math.floor(totalFrames / (fps * 3600));
@@ -957,12 +966,141 @@ function uniqueMediaPaths(clips) {
 
 // ジャンプカットの3プリセット。
 // minDurationSec: これ以上長い無音だけをカット対象にする(ffmpegのsilencedetect d=)
-// residualSec: カット後にその無音区間から残す長さ(自然さ優先か、テンポ優先かの差)
+//   (省略時は tailSec + breathSec + MIN_CUT_SEC。これより短い無音はそもそもカットできないため)
+// tailSec: 喋り終わりの後に残す長さ。ユーザー指定で1秒(2026-11-13)。
+// breathSec: 次の喋り出しの直前に残す長さ。カット後は言葉の始まりから直接つなぐ(無音を入れない、
+//   ユーザー指定 2026-11-13)ので0。息継ぎは自動しきい値で無音側に判定され、カットされる。
+// 旧実装は語尾側0.03秒しか残しておらず「喋り終えてからカットが早い」問題があった。
+// natural: 喋り終わりから1秒残す(間を大切にする)。
+// tempo: 喋り終わりから0.15秒だけ残して詰める(間を大切にしない、テンポ優先。ユーザー指定 2026-11-13)。
+//   0.15秒は語尾の余韻が切れない最小限。旧実装の0.03秒では語尾が切れていた。
 const JUMP_CUT_PRESETS = {
-  interview: { label: 'インタビュー・対談動画', minDurationSec: 0.5, residualSec: 0.2 },
-  presentation: { label: 'プレゼンテーション・解説動画', minDurationSec: 0.3, residualSec: 0.1 },
-  vlog: { label: 'Vlog・日常系動画', minDurationSec: 1.0, residualSec: 0.3 }
+  natural: { label: '間を残す(喋り終わりから1秒残す)', tailSec: 1.0, breathSec: 0 },
+  tempo: { label: 'テンポ重視(間を詰める)', tailSec: 0.15, breathSec: 0 }
 };
+// 旧プリセット名(パネルの古い版・API利用)の互換
+JUMP_CUT_PRESETS.interview = JUMP_CUT_PRESETS.natural;
+JUMP_CUT_PRESETS.presentation = JUMP_CUT_PRESETS.tempo;
+JUMP_CUT_PRESETS.vlog = JUMP_CUT_PRESETS.natural;
+// tail/breathを残した結果、カット区間がこれより短くなる無音はカットしない
+// (細切れの極小クリップが残るのを防ぐ)。
+const MIN_CUT_SEC = 0.2;
+// 無音と無音の間にある、これより短い「音あり」区間はリップノイズやクリック音とみなして
+// 無音側に吸収する(極小クリップが1つだけ取り残される原因になるため)。
+const NOISE_BLIP_SEC = 0.12;
+
+// 素材ごとに無音のしきい値(dB)を自動で決める。固定の-35dBだと、部屋の雑音が大きい素材では
+// 無音を検出できず、声の小さい素材では語尾や息継ぎまで無音扱いになってしまうため。
+// 音声を50ms単位のRMS(dB)に変換し、静かな側(10パーセンタイル)を環境ノイズ、
+// 大きい側(90パーセンタイル)を声の大きさとみなし、その間(ノイズ+60%)をしきい値にする。
+// 静かな素材では 無音≒-80dB・息継ぎ≒-50dB・声≒-20dB なので、しきい値は約-44dBになり、
+// 息継ぎは無音側(=カット対象)、声は小さな語尾も含めて音あり側に判定される。
+// 音声を20ms単位のRMS(dB)列に変換する。
+const LEVEL_FRAME_SEC = 0.02;
+async function readLevelFrames(mediaPath) {
+  const SR = 16000;
+  const FRAME = Math.round(SR * LEVEL_FRAME_SEC);
+  const dbs = [];
+  await new Promise((resolve, reject) => {
+    const proc = spawn(resolveBinary('ffmpeg'), [
+      '-v', 'error', '-i', mediaPath, '-vn', '-ac', '1', '-ar', String(SR), '-f', 's16le', '-'
+    ], { env: AUGMENTED_ENV });
+    let carry = Buffer.alloc(0);
+    let sumSq = 0, n = 0;
+    proc.stdout.on('data', (chunk) => {
+      const buf = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+      const usable = buf.length - (buf.length % 2);
+      for (let i = 0; i < usable; i += 2) {
+        const v = buf.readInt16LE(i) / 32768;
+        sumSq += v * v;
+        if (++n === FRAME) {
+          dbs.push(10 * Math.log10(sumSq / n + 1e-12));
+          sumSq = 0; n = 0;
+        }
+      }
+      carry = buf.slice(usable);
+    });
+    proc.stderr.on('data', () => {});
+    proc.on('error', reject);
+    proc.on('close', resolve);
+  });
+  return dbs;
+}
+
+// ffmpegのsilencedetectは「サンプル1つ1つの振幅」で判定するため、平均すると静かな
+// 息継ぎでも瞬間的なピークがしきい値を超えて「音あり」になってしまう。しきい値を決めた
+// のと同じRMS(平均音量)で無音区間を判定して、判定基準をそろえる。
+function silenceFromFrames(dbs, thresholdDb) {
+  const out = [];
+  let start = -1;
+  for (let i = 0; i <= dbs.length; i++) {
+    const silent = i < dbs.length && dbs[i] < thresholdDb;
+    if (silent && start < 0) start = i;
+    if (!silent && start >= 0) {
+      out.push({ start: start * LEVEL_FRAME_SEC, end: i * LEVEL_FRAME_SEC });
+      start = -1;
+    }
+  }
+  return out;
+}
+
+// 「〜です」の「す」のように、一瞬途切れてから小さく出る語尾は、短い音なので
+// NOISE_BLIP_SECの吸収でノイズ扱いされ、語尾が切れる原因になる(テンポ重視で顕在化)。
+// 無音の先頭から、直前の音との間が SOFT_ENDING_GAP_SEC 以内で続く音は語尾とみなし、
+// 無音の開始をその後ろにずらす。喋り出し前の短い音(息を吸う音など)はずらさない=カットされる。
+const SOFT_ENDING_GAP_SEC = 0.3;
+function extendSilenceStartsPastSoftEndings(silences, dbs, thresholdDb) {
+  const out = [];
+  for (const iv of silences) {
+    let lastSoundEnd = iv.start;
+    const i0 = Math.round(iv.start / LEVEL_FRAME_SEC);
+    const i1 = Math.min(dbs.length, Math.round(iv.end / LEVEL_FRAME_SEC));
+    for (let i = i0; i < i1; i++) {
+      const t = i * LEVEL_FRAME_SEC;
+      if (t - lastSoundEnd > SOFT_ENDING_GAP_SEC) break;
+      if (dbs[i] >= thresholdDb) lastSoundEnd = t + LEVEL_FRAME_SEC;
+    }
+    if (lastSoundEnd < iv.end) out.push({ start: lastSoundEnd, end: iv.end });
+  }
+  return out;
+}
+
+// 喋り出しの直前に「声の大きさの短い音 → 一瞬途切れる → 声」という形があると、
+// 短い音がNOISE_BLIP_SECの吸収でノイズ扱いされ、言葉の頭(最初の子音)が欠ける。
+// 喋り出しの直前 ONSET_LEAD_GAP_SEC 以内にある、声に近い大きさ(speechDb-12dB以上)の音は
+// 言葉の頭とみなして残す。息を吸う音は声より静か(静かな素材で-40〜-50dB)なのでカットされる。
+const ONSET_LEAD_GAP_SEC = 0.1;
+function extendSilenceEndsBeforeOnsets(silences, dbs, loudDb) {
+  const out = [];
+  for (const iv of silences) {
+    let firstSoundStart = iv.end;
+    const i0 = Math.round(iv.start / LEVEL_FRAME_SEC);
+    for (let i = Math.min(dbs.length, Math.round(iv.end / LEVEL_FRAME_SEC)) - 1; i >= i0; i--) {
+      const t = i * LEVEL_FRAME_SEC;
+      if (firstSoundStart - (t + LEVEL_FRAME_SEC) > ONSET_LEAD_GAP_SEC) break;
+      if (dbs[i] >= loudDb) firstSoundStart = t;
+    }
+    if (firstSoundStart > iv.start) out.push({ start: iv.start, end: firstSoundStart });
+  }
+  return out;
+}
+
+function adaptiveThresholdFromFrames(dbs) {
+  // デジタル無音(完全な0)は統計から外す
+  const valid = dbs.filter((d) => d > -90).sort((a, b) => a - b);
+  if (valid.length < 40) return { thresholdDb: -35, noiseDb: null, speechDb: null };
+  const pct = (p) => valid[Math.min(valid.length - 1, Math.floor(valid.length * p))];
+  const noiseDb = pct(0.1);
+  const speechDb = pct(0.9);
+  let thresholdDb = noiseDb + (speechDb - noiseDb) * 0.6;
+  // 声とノイズの差が小さすぎる/大きすぎる素材でも極端な値にならないよう制限する
+  thresholdDb = Math.max(-50, Math.min(-25, thresholdDb));
+  return {
+    thresholdDb: Math.round(thresholdDb * 10) / 10,
+    noiseDb: Math.round(noiseDb * 10) / 10,
+    speechDb: Math.round(speechDb * 10) / 10
+  };
+}
 
 // テロップ用フォントプリセットは、このフォルダに保存した.mogrtファイルを自動的に一覧化する。
 // Premiereのエッセンシャルグラフィックスパネルで文字レイヤーに「マイスタイル」を適用して
@@ -1102,13 +1240,14 @@ function wrapTelopText(text, maxCharsPerLine) {
 
 async function workflowJumpCut(opts) {
   const preset = opts.preset && JUMP_CUT_PRESETS[opts.preset] ? JUMP_CUT_PRESETS[opts.preset] : null;
-  const thresholdDb = opts.thresholdDb != null ? opts.thresholdDb : -35;
-  const minDurSec = opts.minDurationSec != null ? opts.minDurationSec : (preset ? preset.minDurationSec : 0.4);
-  // 無音区間のうち、カットせず残す長さ(末尾側)。呼吸や次の発話前のタメを完全には消さない。
-  const residualSec = opts.residualSec != null ? opts.residualSec : (preset ? preset.residualSec : 0.1);
-  // 無音の先頭側に残す極小ハンドル。直前の発話の尻を切らないための保険(残す長さには含めない)。
-  const leadHandleSec = opts.leadHandleSec != null ? opts.leadHandleSec : 0.03;
-  const mergeGapSec = opts.mergeGapSec != null ? opts.mergeGapSec : 0.15;
+  const p = preset || JUMP_CUT_PRESETS.natural;
+  // 喋り終わりの後に残す長さ。旧API互換でleadHandleSecも受け付ける。
+  const tailSec = opts.tailSec != null ? opts.tailSec : (opts.leadHandleSec != null ? opts.leadHandleSec : p.tailSec);
+  // 次の喋り出しの直前に残す長さ。旧API互換でresidualSecも受け付ける。
+  const breathSec = opts.breathSec != null ? opts.breathSec : (opts.residualSec != null ? opts.residualSec : p.breathSec);
+  const minDurSec = opts.minDurationSec != null ? opts.minDurationSec
+    : (p.minDurationSec != null ? p.minDurationSec : tailSec + breathSec + MIN_CUT_SEC);
+  const mergeGapSec = opts.mergeGapSec != null ? opts.mergeGapSec : 0.05;
 
   const info = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO);
   const clips = (info.audio && info.audio[0] && info.audio[0].clips) || [];
@@ -1120,16 +1259,28 @@ async function workflowJumpCut(opts) {
   if (paths.length === 0) throw new Error('A1クリップのメディアパスを取得できませんでした。');
 
   const intervalsByPath = {};
-  for (const p of paths) {
-    intervalsByPath[p] = await detectSilenceInFile(p, thresholdDb, minDurSec);
+  const levels = {};
+  for (const mp of paths) {
+    let thresholdDb = opts.thresholdDb;
+    // 短い無音も一旦すべて検出し、ノイズの「プツッ」で分断された無音をつなげてから長さで絞る
+    const frames = await readLevelFrames(mp);
+    if (thresholdDb == null) {
+      levels[mp] = adaptiveThresholdFromFrames(frames);
+      thresholdDb = levels[mp].thresholdDb;
+    }
+    const raw = silenceFromFrames(frames, thresholdDb);
+    let sil = extendSilenceStartsPastSoftEndings(mergeNearbyIntervals(raw, NOISE_BLIP_SEC), frames, thresholdDb);
+    const speechDb = levels[mp] && levels[mp].speechDb != null ? levels[mp].speechDb : thresholdDb + 15;
+    sil = extendSilenceEndsBeforeOnsets(sil, frames, Math.max(thresholdDb, speechDb - 12));
+    intervalsByPath[mp] = sil.filter((iv) => iv.end - iv.start >= minDurSec);
   }
 
   let timelineSilences = mapIntervalsToTimeline(clips, intervalsByPath);
-  // 無音区間の末尾側に residualSec を残し、先頭側は leadHandleSec だけ避けてカットする。
-  // 例: 0.5秒以上の無音を検出し、0.2秒だけ残す → カットするのは [start+0.03, end-0.2] の区間。
+  // 無音区間の先頭側(=喋り終わりの後)に tailSec、末尾側(=次の喋り出しの直前)に breathSec を残し、
+  // その間だけをカットする。例: 5秒の無音 → [start+1.0, end] の4秒をカット(息継ぎも含む)。
   timelineSilences = timelineSilences
-    .map((iv) => ({ start: iv.start + leadHandleSec, end: iv.end - residualSec }))
-    .filter((iv) => iv.end > iv.start);
+    .map((iv) => ({ start: iv.start + tailSec, end: iv.end - breathSec }))
+    .filter((iv) => iv.end - iv.start >= MIN_CUT_SEC);
   timelineSilences = mergeNearbyIntervals(timelineSilences, mergeGapSec);
 
   if (timelineSilences.length === 0) {
@@ -1141,7 +1292,9 @@ async function workflowJumpCut(opts) {
     };
   }
 
-  const razorResult = await evalJSON(scriptApplyJumpCuts(timelineSilences));
+  // カット数×トラック数だけrazorとクリップ削除が走るので、テンポ重視(数百か所)だと
+  // 既定の45秒では終わらない。カット処理だけは最大10分待つ。
+  const razorResult = await evalJSON(scriptApplyJumpCuts(timelineSilences), 600000);
   if (razorResult.error) throw new Error(razorResult.error);
 
   const razorDeletedTotal = (razorResult.deletedVideo || 0) + (razorResult.deletedAudio || 0);
@@ -1163,7 +1316,10 @@ async function workflowJumpCut(opts) {
     sequenceName: info.name,
     preset: opts.preset || null,
     minDurationSec: minDurSec,
-    residualSec: residualSec,
+    tailSec: tailSec,
+    breathSec: breathSec,
+    thresholdDb: opts.thresholdDb != null ? opts.thresholdDb : Object.values(levels).map((l) => l.thresholdDb),
+    levels: levels,
     cuts: timelineSilences.length,
     method: method,
     finalDurationSec: finalResult.finalDurationSec
@@ -1491,6 +1647,8 @@ async function workflowInsertMedia(opts) {
 const BROLL_ROOT = process.env.EDITFLUX_BROLL_ROOT
   || path.join(os.homedir(), 'Downloads', '広告動画作成素材', '広告素材');
 const BROLL_VIDEO_EXT = new Set(['.mp4', '.mov', '.m4v']);
+// Geminiの判定でこれ未満の確信度のものは挿入しない
+const BROLL_MIN_SCORE = process.env.EDITFLUX_BROLL_MIN_SCORE ? parseFloat(process.env.EDITFLUX_BROLL_MIN_SCORE) : 0.6;
 
 // フォルダ名 → そのフォルダが合う内容を示すキーワード。文字起こしテキストに
 // これらの単語が含まれていたら、そのフォルダをB-roll候補として加点する。
@@ -1577,21 +1735,32 @@ function matchBrollFolders(text, existingFolders) {
 
 // 無音カットと同じ考え方で、Whisperのセグメント開始〜次のセグメント開始までを
 // 「文の頭から次の文の頭まで」の1テイクとみなす(ユーザーの編集ガイドライン通り)。
-// 7秒を超えるテイクは2本に分割する。
+// 短すぎるセグメント(相づち・言いかけ等)は次のセグメントとつなげて1テイクにする
+// (0.5秒程度のB-rollがチラつく原因になり、判定材料のセリフも短すぎて誤判定しやすいため)。
+// 7秒を超えるテイクは、各片が7秒以下になるよう均等に分割する。
+const BROLL_MIN_TAKE_SEC = 2.0;
+const BROLL_MAX_TAKE_SEC = 7;
 function buildBrollTakes(rawCaptions) {
-  const takes = [];
+  const merged = [];
+  let cur = null;
   for (let i = 0; i < rawCaptions.length; i++) {
-    const cur = rawCaptions[i];
+    const seg = rawCaptions[i];
     const next = rawCaptions[i + 1];
-    const takeEnd = next ? next.start : cur.end;
-    if (takeEnd <= cur.start) continue;
-    const duration = takeEnd - cur.start;
-    if (duration > 7) {
-      const mid = cur.start + duration / 2;
-      takes.push({ start: cur.start, end: mid, text: cur.text });
-      takes.push({ start: mid, end: takeEnd, text: cur.text });
-    } else {
-      takes.push({ start: cur.start, end: takeEnd, text: cur.text });
+    const segEnd = next ? next.start : seg.end;
+    if (segEnd <= seg.start) continue;
+    const text = String(seg.text || '').replace(/\n/g, '');
+    if (!cur) cur = { start: seg.start, end: segEnd, text };
+    else { cur.end = segEnd; cur.text += text; }
+    if (cur.end - cur.start >= BROLL_MIN_TAKE_SEC) { merged.push(cur); cur = null; }
+  }
+  if (cur && cur.end - cur.start >= 1.0) merged.push(cur);
+
+  const takes = [];
+  for (const t of merged) {
+    const duration = t.end - t.start;
+    const parts = Math.max(1, Math.ceil(duration / BROLL_MAX_TAKE_SEC));
+    for (let k = 0; k < parts; k++) {
+      takes.push({ start: t.start + duration * k / parts, end: t.start + duration * (k + 1) / parts, text: t.text });
     }
   }
   return takes;
@@ -1601,30 +1770,82 @@ function buildBrollTakes(rawCaptions) {
 // 各セリフに最も合うフォルダを判定してもらう。キーワード辞書より言い回しの揺れに強い。
 // GEMINI_API_KEYが未設定、またはAPI呼び出しに失敗した場合はnullを返し、
 // 呼び出し側でキーワード辞書方式にフォールバックする。
+const GEMINI_TIMEOUT_MS = 120000;
 async function geminiMatchTakes(takes, folderNames) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return null;
 
   const items = takes.map((t, i) => `${i}: ${t.text}`).join('\n');
-  const prompt = '以下は動画のセリフを時系列順に並べたものです。各セリフの内容に最も合う「挿し込み動画(B-roll)」の' +
-    'フォルダ名を、次の候補から1つ選んでください。合う候補が無ければfolderをnullにしてください。\n\n' +
-    `候補フォルダ: ${folderNames.join('、')}\n\n` +
-    `セリフ一覧:\n${items}\n\n` +
-    `出力はJSON配列で、インデックス順にちょうど${takes.length}個の要素を返してください。` +
-    '各要素は {"folder": string|null, "score": number(0〜1の確信度)} の形式にしてください。';
+  // フォルダ名だけでは中身が伝わりにくい(例:「背景+挿絵＋❔」「手罰マーク」)ので、
+  // キーワード辞書がある場合はその意味も添える。
+  const folderLines = folderNames.map((f) => {
+    const kws = BROLL_KEYWORDS[f];
+    return kws && kws.length ? `- ${f}(${kws.join('・')} などの話題)` : `- ${f}`;
+  }).join('\n');
+  const prompt = '以下は動画のセリフを時系列順に並べたものです。各セリフの内容を映像で補強する' +
+    '「挿し込み動画(B-roll)」のフォルダを、候補から1つ選んでください。\n' +
+    '・セリフが具体的に言及している物事・状況・感情に直接合うフォルダだけを選ぶこと\n' +
+    '・こじつけになる場合、挨拶・つなぎ言葉・抽象的な話で合うものが無い場合は folder を null にすること\n' +
+    '・前後のセリフの文脈も考慮すること\n' +
+    '・score は「その映像が視聴者に自然に見えるか」の確信度(0〜1)。迷う場合は0.5未満にすること\n\n' +
+    `候補フォルダ:\n${folderLines}\n\n` +
+    `セリフ一覧(番号: セリフ):\n${items}\n\n` +
+    `出力はJSON配列で、全${takes.length}件について {"i": セリフ番号, "folder": string|null, "score": number} を返してください。`;
 
-  const model = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0.2 }
-      })
+  // メインのモデルが混雑(503)・レート制限(429)・無応答のときは、待って再試行し、
+  // それでもダメなら予備のモデルに切り替える。キーワード辞書へ落ちると判定精度が大きく下がるため。
+  const models = [process.env.GEMINI_MODEL || 'gemini-3.8-flash', process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.5-flash']
+    .filter((m, i, arr) => m && arr.indexOf(m) === i);
+  const requestBody = JSON.stringify({
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      temperature: 0.2,
+      responseSchema: {
+        type: 'ARRAY',
+        items: {
+          type: 'OBJECT',
+          properties: {
+            i: { type: 'INTEGER' },
+            folder: { type: 'STRING', nullable: true },
+            score: { type: 'NUMBER' }
+          },
+          required: ['i', 'folder', 'score']
+        }
+      }
     }
-  );
+  });
+  let res = null;
+  let lastProblem = '';
+  const waits = [2000, 5000];
+  outer:
+  for (const model of models) {
+    for (let attempt = 0; attempt <= waits.length; attempt++) {
+      if (attempt > 0) await sleep(waits[attempt - 1]);
+      try {
+        res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            // 応答が返らないまま処理が止まり続けないよう、1回あたり最大2分で打ち切る
+            signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
+            body: requestBody
+          }
+        );
+      } catch (eFetch) {
+        if (eFetch.name !== 'TimeoutError' && eFetch.name !== 'AbortError') throw eFetch;
+        res = null;
+        lastProblem = `${model}が${GEMINI_TIMEOUT_MS / 1000}秒以内に応答しませんでした`;
+        // 無応答のモデルは再試行しても待ち時間が長くなるだけなので、すぐ予備に切り替える
+        continue outer;
+      }
+      if (res.ok) break outer;
+      if (![429, 500, 503].includes(res.status)) break outer;
+      lastProblem = `${model}が混雑中(${res.status})`;
+    }
+  }
+  if (!res) throw new Error(`Gemini APIエラー: ${lastProblem}`);
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
     throw new Error(`Gemini APIエラー (${res.status}): ${errText.slice(0, 300)}`);
@@ -1639,7 +1860,16 @@ async function geminiMatchTakes(takes, folderNames) {
     throw new Error('Geminiの応答がJSONとして解析できませんでした: ' + text.slice(0, 200));
   }
   if (!Array.isArray(parsed)) throw new Error('Geminiの応答が配列ではありません');
-  return parsed;
+  // 配列の並び順ではなく、各要素のセリフ番号(i)で対応付ける。件数が多いとGeminiが
+  // 途中の1件を飛ばすことがあり、並び順で対応付けると以降の判定が全部1つずつずれて
+  // 「関係ない素材が入る」原因になるため。
+  const byIndex = new Array(takes.length).fill(null);
+  parsed.forEach((r, pos) => {
+    if (!r || typeof r !== 'object') return;
+    const idx = Number.isInteger(r.i) ? r.i : (parsed.length === takes.length ? pos : -1);
+    if (idx >= 0 && idx < takes.length) byIndex[idx] = r;
+  });
+  return byIndex;
 }
 
 // takes(候補)の中からマッチしたものだけを残し、合計尺が動画全体の
@@ -1671,8 +1901,9 @@ async function buildBrollPlan(rawCaptions, totalDurationSec, opts) {
     let score = 0;
     const g = geminiResults && geminiResults[i];
     if (g && g.folder && existingFolders.has(g.folder)) {
-      folder = g.folder;
-      score = typeof g.score === 'number' ? g.score : 0.5;
+      const gScore = typeof g.score === 'number' ? g.score : 0.5;
+      // 確信度の低い判定は入れない(「全部挿入」がONでも、こじつけの素材は除外する)
+      if (gScore >= BROLL_MIN_SCORE) { folder = g.folder; score = gScore; }
     } else if (!geminiResults) {
       const matches = matchBrollFolders(take.text, existingFolders);
       if (matches.length > 0) { folder = matches[0].folder; score = matches[0].score; }
@@ -1826,7 +2057,8 @@ async function workflowInsertBroll(opts) {
     throw new Error(`素材フォルダが見つかりません: ${BROLL_ROOT}`);
   }
   const language = opts.language || 'ja';
-  const model = opts.model || 'small';
+  // smallは日本語の誤認識が多く、セリフを読み違えると素材の判定も外れるためmediumを既定にする
+  const model = opts.model || process.env.EDITFLUX_BROLL_WHISPER_MODEL || 'medium';
 
   const info = await evalJSON(SCRIPT_GET_ACTIVE_SEQ_INFO);
   const clips = (info.audio && info.audio[0] && info.audio[0].clips) || [];

@@ -133,7 +133,8 @@
 
     window.runJumpCut = async function () {
         var btn = document.getElementById('jumpCutBtn');
-        var preset = document.getElementById('jumpCutPreset').value;
+        var checked = document.querySelector('input[name="jumpCutPreset"]:checked');
+        var preset = checked ? checked.value : 'natural';
         btn.disabled = true;
         log('ジャンプカットを実行中… (無音検出 → カット適用)', 'info');
         try {
@@ -143,7 +144,8 @@
                 : '削除クリップ 映像' + (result.deletedVideoClips || 0) + '・音声' + (result.deletedAudioClips || 0);
             log(
                 'ジャンプカット完了: "' + result.sequenceName + '" / カット数 ' + result.cuts +
-                ' / 方式: ' + result.method + ' / ' + detail,
+                ' / 方式: ' + result.method + ' / ' + detail +
+                (result.thresholdDb != null ? ' / 無音しきい値 ' + [].concat(result.thresholdDb).join(',') + 'dB(自動)' : ''),
                 'ok'
             );
         } catch (e) {

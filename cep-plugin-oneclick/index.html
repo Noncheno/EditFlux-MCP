@@ -165,12 +165,15 @@
 
         <div class="step-content active" data-step="1">
             <button onclick="runJumpCut()" id="jumpCutBtn">ジャンプカットを実行</button>
-            <div class="opts">
-                <select id="jumpCutPreset">
-                    <option value="interview" selected>インタビュー・対談動画(0.5秒以上→0.2秒残す)</option>
-                    <option value="presentation">プレゼン・解説動画(0.3秒以上→0.1秒に短縮)</option>
-                    <option value="vlog">Vlog・日常系動画(1.0秒以上→0.3秒に詰める)</option>
-                </select>
+            <div class="opts" style="flex-direction:column; align-items:flex-start; gap:6px;">
+                <label style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-1);">
+                    <input type="radio" name="jumpCutPreset" value="natural" checked>
+                    間を残す(喋り終わりから1秒残す)
+                </label>
+                <label style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-1);">
+                    <input type="radio" name="jumpCutPreset" value="tempo">
+                    テンポ重視(間を詰める)
+                </label>
             </div>
         </div>
 
