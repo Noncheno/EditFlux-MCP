@@ -52,7 +52,7 @@ def validate(xml_path, root, cpl=16):
     if not parsed:
         return False, "\n".join(f"{n:2d}. [{'OK' if ok else 'NG'}] {nm} {d}" for n, nm, ok, d in res)
     check(3, "XMLとしてパース可能", True)
-    seqs = tree.findall("sequence")
+    seqs = tree.findall(".//sequence")
     check(4, "sequenceが1個", len(seqs) == 1, f"{len(seqs)}個")
     seq = seqs[0]
     sc = seq.find("media/video/format/samplecharacteristics")
@@ -60,7 +60,7 @@ def validate(xml_path, root, cpl=16):
     check(5, "1920×1080", (w, h) == ("1920", "1080"), f"{w}×{h}")
     tb, ntsc = seq.findtext("rate/timebase"), seq.findtext("rate/ntsc")
     src_tb = None
-    f1 = seq.find(".//file[@id='file-1']/rate/timebase")
+    f1 = tree.find(".//file[@id='file-1']/rate/timebase")
     if f1 is not None:
         src_tb = f1.text
     check(6, "timebase/ntscが素材のフレームレートと一致", tb == src_tb and ntsc in ("TRUE", "FALSE"),
@@ -140,7 +140,7 @@ def validate(xml_path, root, cpl=16):
     check(28, "clipitem直下にText effectが無い",
           not any(e.findtext("effectid") == "Text" for c in clips for e in c.findall("effect")))
     missing = []
-    for pu in {e.text for e in seq.iter("pathurl")}:
+    for pu in {e.text for e in tree.iter("pathurl")}:
         p = urllib.parse.unquote(pu.replace("file://localhost", ""))
         if not os.path.exists(p):
             missing.append(p)

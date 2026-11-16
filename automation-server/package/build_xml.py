@@ -200,17 +200,14 @@ def build(plan):
     for i, c in enumerate(cuts, start=1):
         x = [f"{I}<clipitem id=\"clipitem-v1-{i}\">\n",
              f"{I}  <masterclipid>masterclip-1</masterclipid>\n",
-             f"{I}  <name>{escape(os.path.basename(src['path']))}</name>\n",
+             f"{I}  <name>{escape(src.get('orig') or os.path.basename(src['path']))}</name>\n",
              f"{I}  <enabled>TRUE</enabled>\n",
              f"{I}  <duration>{src['duration']}</duration>\n",
              rate_xml(tb, ntsc, I + "  "),
              f"{I}  <start>{c['start']}</start>\n{I}  <end>{c['end']}</end>\n",
              f"{I}  <in>{c['in']}</in>\n{I}  <out>{c['out']}</out>\n",
              f"{I}  <alphatype>none</alphatype>\n"]
-        if i == 1:
-            x.append(file_full_xml("file-1", src["path"], src, I + "  ", True))
-        else:
-            x.append(f"{I}  <file id=\"file-1\"/>\n")
+        x.append(f"{I}  <file id=\"file-1\"/>\n")  # 完全な定義はビン(動画素材)の中に書く
         x.append(f"{I}  <sourcetrack>\n{I}    <mediatype>video</mediatype>\n{I}    <trackindex>1</trackindex>\n{I}  </sourcetrack>\n")
         if scale:
             x.append(motion_filter_xml(scale, I + "  "))
@@ -224,7 +221,7 @@ def build(plan):
     for i, c in enumerate(cuts, start=1):
         x = [f"{I}<clipitem id=\"clipitem-a1-{i}\">\n",
              f"{I}  <masterclipid>masterclip-1</masterclipid>\n",
-             f"{I}  <name>{escape(os.path.basename(src['path']))}</name>\n",
+             f"{I}  <name>{escape(src.get('orig') or os.path.basename(src['path']))}</name>\n",
              f"{I}  <enabled>TRUE</enabled>\n",
              f"{I}  <duration>{src['duration']}</duration>\n",
              rate_xml(tb, ntsc, I + "  "),
@@ -270,8 +267,10 @@ def build(plan):
                 f"{ind}  </effect>\n{ind}</filter>\n")
 
     def audio_clip(cid, fid, path, info, start, end, inp, ind, full, gain=None, fade_in=0, fade_out=0, points=None):
+        full = False  # 完全な定義はビン(BGM/効果音)の中に書く
         x = [f"{ind}<clipitem id=\"{cid}\">\n",
-             f"{ind}  <name>{escape(os.path.basename(path))}</name>\n",
+             f"{ind}  <masterclipid>master-{fid}</masterclipid>\n",
+             f"{ind}  <name>{escape(info.get('orig') or os.path.basename(path))}</name>\n",
              f"{ind}  <enabled>TRUE</enabled>\n",
              f"{ind}  <duration>{info['duration']}</duration>\n",
              rate_xml(tb, ntsc, ind + "  "),
@@ -345,7 +344,47 @@ def build(plan):
         return (f"      <track>\n{''.join(items)}        <enabled>TRUE</enabled>\n        <locked>FALSE</locked>\n"
                 f"        <outputchannelindex>1</outputchannelindex>\n      </track>\n")
 
+    # ── ビン(Premiereのプロジェクトパネルのフォルダ)。素材の完全な定義はここに書き、シーケンスからは参照だけする。
+    # 読み込むと「動画素材」「BGM」「効果音」のビンができ、元のファイル名で並ぶ(Premiere 2026 で実機確認済み)
+    def bin_clip(mid, fid, path, info, name, has_video, ind):
+        dur = info["duration"]
+        finfo = dict(info, timebase=info.get("timebase", tb), ntsc=info.get("ntsc", ntsc))
+        head = (f"{ind}<clip id=\"{mid}\">\n{ind}  <name>{escape(name)}</name>\n{ind}  <duration>{dur}</duration>\n"
+                + rate_xml(finfo["timebase"], finfo["ntsc"], ind + "  ") + f"{ind}  <media>\n")
+        body = ""
+        kinds = (["video"] if has_video else []) + ["audio"]
+        for n, kind in enumerate(kinds):
+            fx = file_full_xml(fid, path, finfo, ind + "          ", has_video) if n == 0 else f"{ind}          <file id=\"{fid}\"/>\n"
+            body += (f"{ind}    <{kind}>\n{ind}      <track>\n{ind}        <clipitem id=\"{mid}-{kind}\">\n"
+                     f"{ind}          <name>{escape(name)}</name>\n{ind}          <duration>{dur}</duration>\n"
+                     + rate_xml(finfo["timebase"], finfo["ntsc"], ind + "          ")
+                     + f"{ind}          <start>0</start>\n{ind}          <end>{dur}</end>\n"
+                     f"{ind}          <in>0</in>\n{ind}          <out>{dur}</out>\n" + fx
+                     + f"{ind}          <sourcetrack>\n{ind}            <mediatype>{kind}</mediatype>\n"
+                     f"{ind}            <trackindex>1</trackindex>\n{ind}          </sourcetrack>\n"
+                     f"{ind}        </clipitem>\n{ind}      </track>\n{ind}    </{kind}>\n")
+        return head + body + f"{ind}  </media>\n{ind}</clip>\n"
+
+    def bin_xml(name, clips):
+        return f"    <bin>\n      <name>{escape(name)}</name>\n      <children>\n{''.join(clips)}      </children>\n    </bin>\n"
+
+    B = "        "
+    bins = [bin_xml(plan.get("bin_names", {}).get("video", "動画素材"),
+                    [bin_clip("masterclip-1", "file-1", src["path"], src,
+                              src.get("orig") or os.path.basename(src["path"]), True, B)])]
+    if bgm:
+        bins.append(bin_xml(plan.get("bin_names", {}).get("bgm", "BGM"),
+                            [bin_clip("master-file-bgm", "file-bgm", bgm["path"], bgm,
+                                      bgm.get("orig") or os.path.basename(bgm["path"]), False, B)]))
+    if seen:
+        sfx_by_path = {s["path"]: s for s in plan.get("sfx", [])}
+        bins.append(bin_xml(plan.get("bin_names", {}).get("sfx", "効果音"),
+                            [bin_clip(f"master-{fid}", fid, p, sfx_by_path[p],
+                                      sfx_by_path[p].get("orig") or os.path.basename(p), False, B)
+                             for p, fid in seen.items()]))
+
     xml = ['<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE xmeml>\n<xmeml version="5">\n',
+           f'  <project>\n    <name>{escape(seq["name"])}</name>\n    <children>\n', *bins,
            f'  <sequence id="sequence-1">\n    <name>{escape(seq["name"])}</name>\n',
            f"    <duration>{seq_dur}</duration>\n", rate_xml(tb, ntsc, "    "),
            "    <timecode>\n", rate_xml(tb, ntsc, "      "),
@@ -363,7 +402,7 @@ def build(plan):
            "            <downmix>0</downmix>\n            <channel>\n              <index>1</index>\n            </channel>\n",
            "            <channel>\n              <index>2</index>\n            </channel>\n          </group>\n        </outputs>\n",
            atrack(a1), atrack(a2), atrack(a3),
-           "      </audio>\n    </media>\n  </sequence>\n</xmeml>\n"]
+           "      </audio>\n    </media>\n  </sequence>\n    </children>\n  </project>\n</xmeml>\n"]
     # 完全なXMLの中では、ネストの都合でトラック内クリップのインデントは揃っていないが、
     # パース結果には影響しない
     return "".join(xml)

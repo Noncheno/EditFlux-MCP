@@ -757,7 +757,7 @@ def main():
             shutil.copy2(f, used[f])
         t = next(t for t in telops if t["k"] == tk)
         si = probe(used[f])
-        sfx_entries.append({"path": used[f], "orig": os.path.basename(f), "start": t["start"],
+        sfx_entries.append({"path": used[f], "orig": unicodedata.normalize("NFC", os.path.basename(f)), "start": t["start"],
                             "duration": max(1, round(si["duration_sec"] * fps)), "gain": 0.5,
                             "samplerate": si.get("samplerate", 48000), "channels": si.get("channels", 2),
                             "telop": "".join(t["lines"])})
@@ -782,13 +782,13 @@ def main():
     style = {"font": a.font}
     plan = {
         "sequence": {"name": a.seq_name, "width": 1920, "height": 1080, "timebase": timebase, "ntsc": ntsc},
-        "source": {"path": src_copy, "duration": round(info["duration_sec"] * fps), "width": info["width"],
+        "source": {"path": src_copy, "orig": unicodedata.normalize("NFC", os.path.basename(video)), "duration": round(info["duration_sec"] * fps), "width": info["width"],
                    "height": info["height"], "timebase": timebase, "ntsc": ntsc,
                    "channels": info.get("channels", 2), "samplerate": info.get("samplerate", 48000)},
         "cuts": cuts,
         "telops": [{"track": t["track"], "text": t["text"], "start": t["start"], "end": t["end"]} for t in telops],
         "title": {"text": f"{a.title}｜{a.channel}"},
-        "bgm": {"path": bgm_copy, "duration": round(bgm_info["duration_sec"] * fps),
+        "bgm": {"path": bgm_copy, "orig": unicodedata.normalize("NFC", os.path.basename(bgm_pick)), "duration": round(bgm_info["duration_sec"] * fps),
                 "samplerate": bgm_info.get("samplerate", 48000), "channels": bgm_info.get("channels", 2),
                 "gain": BGM_SPEECH, "fade_in": round(1.0 * fps), "fade_out": round(2.0 * fps),
                 "envelope": envelope},
@@ -849,7 +849,8 @@ def main():
                  "source": {"path": pv, "duration": round(pi["duration_sec"] * fps), "width": pi["width"],
                             "height": pi["height"], "timebase": timebase, "ntsc": ntsc,
                             "channels": pi.get("channels", 2), "samplerate": pi.get("samplerate", 48000)},
-                 "cuts": [{"start": 0, "end": seq_frames, "in": 0, "out": seq_frames}], "telops": []}
+                 "cuts": [{"start": 0, "end": seq_frames, "in": 0, "out": seq_frames}], "telops": [],
+                 "bin_names": {"video": "プレビュー"}}
         with open(os.path.join(D["Project"], "preview_match_sequence.xml"), "w", encoding="utf-8", newline="\n") as f:
             f.write(build_xml.build(pplan))
 
