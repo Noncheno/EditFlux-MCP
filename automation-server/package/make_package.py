@@ -693,17 +693,17 @@ def main():
         en = snap_end(words_final[c["to"]]["end"], tl, dbs, thr)
         telops.append({"k": k, "text": "\r".join(c["lines"]), "lines": c["lines"], "emphasis": bool(c.get("emphasis")),
                        "sfx": c.get("sfx"), "start_sec": st, "end_sec": max(en, st + 0.5)})
+    # テロップの間に隙間を作らない: 次のセリフが始まるまで前のテロップを出し続ける(ユーザー要望 2026-11-16)
     for k in range(len(telops) - 1):
-        nxt = telops[k + 1]["start_sec"]
-        if telops[k]["end_sec"] > nxt or nxt - telops[k]["end_sec"] < 0.4:
-            telops[k]["end_sec"] = nxt  # 次のテロップと重ねない/チラつかせない
+        telops[k]["end_sec"] = telops[k + 1]["start_sec"]
+    if telops:
+        telops[-1]["end_sec"] = seq_frames / fps  # 最後のテロップは動画の終わりまで
     for t in telops:
         t["start"] = max(0, round(t["start_sec"] * fps))
         t["end"] = min(seq_frames, max(t["start"] + 1, round(t["end_sec"] * fps)))
         t["track"] = 3 if t["emphasis"] else 2
     for k in range(len(telops) - 1):
-        if telops[k]["end"] > telops[k + 1]["start"]:
-            telops[k]["end"] = telops[k + 1]["start"]
+        telops[k]["end"] = telops[k + 1]["start"]  # フレームに丸めた後も、次のテロップの開始ぴったりまでつなぐ
     telops = [t for t in telops if t["end"] > t["start"]]
 
     # 7. BGM・効果音
