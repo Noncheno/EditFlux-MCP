@@ -9,6 +9,7 @@ APIキーは環境変数 GEMINI_API_KEY、無ければ EditFlux の automation-s
 """
 
 import base64
+import hashlib
 import json
 import os
 import time
@@ -16,6 +17,8 @@ import urllib.error
 import urllib.request
 
 TIMEOUT = 300
+CACHE_DIR = os.path.join(os.environ.get("PREMIERE_PACKAGE_CACHE",
+                                        os.path.expanduser("~/Library/Caches/premiere-xml-package")), "gemini")
 ENV_CANDIDATES = [
     os.path.expanduser("~/Projects/EditFlux/automation-server/.env"),
     os.path.expanduser("~/Library/Application Support/Adobe/CEP/extensions/EditFluxOneClick/automation-server/.env"),
@@ -84,12 +87,22 @@ def generate_json(prompt, schema=None, audio_path=None, audio_mime="audio/mp3", 
     if schema:
         cfg["responseSchema"] = schema
     body = json.dumps({"contents": [{"parts": parts}], "generationConfig": cfg}).encode()
+    # 同じ依頼の応答は保存して使い回す(途中で止まっても、再実行では続きから処理できる。無料枠の節約にもなる)
+    cache_path = os.path.join(CACHE_DIR, hashlib.md5(body).hexdigest() + ".json")
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, encoding="utf-8") as f:
+                c = json.load(f)
+            log("  (前回のGeminiの応答を再利用)")
+            return c["res"], c["model"]
+        except Exception:
+            pass
     key = api_key()
     last = ""
     for model in models():
         if model in _EXHAUSTED:
             continue
-        waits = [0, 3, 8, 20]
+        waits = [0, 5, 15, 30, 60, 90]
         attempt = 0
         while attempt < len(waits):
             if waits[attempt]:
@@ -125,7 +138,14 @@ def generate_json(prompt, schema=None, audio_path=None, audio_mime="audio/mp3", 
                 break
             try:
                 text = data["candidates"][0]["content"]["parts"][0]["text"]
-                return json.loads(text), model
+                res = json.loads(text)
+                try:
+                    os.makedirs(CACHE_DIR, exist_ok=True)
+                    with open(cache_path, "w", encoding="utf-8") as f:
+                        json.dump({"res": res, "model": model}, f, ensure_ascii=False)
+                except OSError:
+                    pass
+                return res, model
             except Exception as e:
                 last = f"{model}: 応答の解析に失敗 {e}"
                 continue

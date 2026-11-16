@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -353,6 +354,48 @@ def repair_cards(bad_cards, cpl, title_hint):
     return {int(r["k"]): r["telops"] for r in res.get("results", [])}
 
 
+def bgm_candidates(bgm, seq_sec):
+    """短い曲が何度もつながらないよう、動画の長さ(最大2分)以上ある曲だけを候補にする"""
+    files = list_audio(bgm)
+    if len(files) <= 1:
+        return files
+    need = min(seq_sec, 120)
+    long_enough = []
+    for f in files:
+        try:
+            if probe(f)["duration_sec"] >= need:
+                long_enough.append(f)
+        except Exception:
+            pass
+    return long_enough or files
+
+
+def claude_request_text(words, script_text, cpl, hint, title, bgm_files, sfx_files, out_path):
+    """--engine claude のとき、Claude に渡すテロップ作成の依頼文(単語列つき)"""
+    return (
+        "# テロップ・BGM・効果音の作成依頼(Claude用)\n\n"
+        "下の単語列は、カット編集済みの動画の話者音声をWhisperで文字起こししたもの(番号:単語、誤認識を含む)。"
+        "これを読んで画面に出すテロップを作り、次の形のJSONを書き出すこと:\n"
+        f"  {out_path}\n\n"
+        '{"summary": "動画の内容を1文で", "bgm": "BGM候補のファイル名", '
+        '"cards": [{"from": 0, "to": 5, "lines": ["1行目", "2行目"], "emphasis": false, "sfx": "効果音のファイル名(付ける時だけ)"}]}\n\n'
+        "## テロップのルール\n"
+        + CARD_RULES.format(cpl=cpl)
+        + f"・固有名詞の参考(動画タイトル・チャンネル名・話者名): {hint}\n"
+        "・from/to はそのテロップで話している単語番号の範囲。重ならず、時系列順に増えること。"
+        "全ての話を漏れなくテロップにする(フィラー「えー」「あの」だけの部分は飛ばしてよい)\n"
+        "・Whisperの誤認識は文脈から正しい言葉に直す。聞き取れない固有名詞は推測しすぎない\n"
+        "・lines は表示する行の配列(1行なら1要素、2行なら2要素)\n"
+        "・summary は動画の内容を1文で\n\n"
+        "## BGM・効果音\n"
+        "・bgm: 下の候補から、内容と雰囲気に合い声を邪魔しない曲を1つ(ファイル名のまま)\n"
+        "・sfx: 強調テロップ(emphasis true)のうち2〜4枚に、合う効果音を候補から付ける。同じ音の多用は避ける\n\n"
+        f"### BGM候補\n" + "\n".join(os.path.basename(f) for f in bgm_files) + "\n\n"
+        f"### 効果音候補\n" + "\n".join(os.path.basename(f) for f in sfx_files) + "\n\n"
+        + (f"## 台本\n{script_text}\n\n" if script_text else "## 台本\n(なし。単語列を正として書き起こす)\n\n")
+        + f"## 単語列({len(words)}語)\n" + "\n".join(f"{w['i']}:{w['w']}" for w in words) + "\n")
+
+
 def distribute(card, groups):
     """1枚のテロップを複数枚(groups=[[行,行],...])に分け、単語範囲を文字数の比で配分する"""
     text = "".join("".join(g) for g in groups)
@@ -364,7 +407,8 @@ def distribute(card, groups):
         acc += len("".join(g))
         end = card["to"] if gi == len(groups) - 1 else min(card["to"] - (len(groups) - 1 - gi),
                                                              max(start, card["from"] + round(n_words * acc / max(1, len(text))) - 1))
-        out.append({"from": start, "to": end, "lines": g, "emphasis": card.get("emphasis", False)})
+        out.append({"from": start, "to": end, "lines": g, "emphasis": card.get("emphasis", False),
+                    "sfx": card.get("sfx") if gi == 0 else None})
         start = end + 1
     return out
 
@@ -432,6 +476,11 @@ def main():
     # 言い間違いのカットは既定でオフ(ユーザー判断 2026-11-13: Geminiの依頼回数が倍になり、誤判定で言葉が欠ける
     # おそれがあるため。言い間違いは手作業で消す運用)。必要なときだけ --misspeak で有効にする
     ap.add_argument("--misspeak", action="store_true", help="言い間違い・言い直し・重複・フィラーもカットする")
+    # テロップを作る担当。gemini=Gemini API(パネル用) / claude=このスクリプトは単語列を書き出して止まり、
+    # Claude が Work/cards.json を書いてから --cards で再実行する(Geminiの無料枠を使わない。ユーザー判断 2026-11-16)
+    ap.add_argument("--engine", default="gemini", choices=["gemini", "claude"])
+    ap.add_argument("--cards", default=None, help="Claudeが書いたテロップ・BGM・効果音のJSON(--engine claude の2回目)")
+    ap.add_argument("--force-cards", action="store_true", help="テロップのルール違反が残っていても続ける(機械的に分ける)")
     ap.add_argument("--no-preview", action="store_true")
     ap.add_argument("--seq-name", default="03_CUTS_POINT_TEXT_EDITABLE")
     a = ap.parse_args()
@@ -544,12 +593,38 @@ def main():
         words_final.append({"i": len(words_final), "w": w["w"], "start": s, "end": max(s, e)})
 
     # 5. テロップ作成
-    log("5/9 テロップを作成しています(Gemini: 音声+単語列+台本)…")
-    final_wav = os.path.join(D["Work"], "final_audio.wav")
-    render_audio(src_copy, keep_q, final_wav)
     hint = f"{a.title} / {a.channel}"
     cards, summaries = [], []
-    parts = chunked(words_final, final_wav, D["Work"], "cards")
+    claude_pick = None
+    if a.engine == "claude":
+        bgm_cands = bgm_candidates(a.bgm, seq_frames / fps)
+        sfx_cands = list_audio(a.sfx)
+        if not a.cards:
+            req = os.path.join(D["Work"], "claude_request.txt")
+            with open(req, "w", encoding="utf-8") as f:
+                f.write(claude_request_text(words_final, script_text, cpl, hint, a.title,
+                                            bgm_cands, sfx_cands, os.path.join(D["Work"], "cards.json")))
+            log("5/9 テロップはClaudeが作ります。次のファイルの指示どおりに cards.json を書き、--cards を付けて再実行してください")
+            log(f"  依頼: {req}")
+            sys.exit(3)
+        log("5/9 Claudeが作ったテロップを読み込んでいます…")
+        claude_pick = json.load(open(os.path.expanduser(a.cards), encoding="utf-8"))
+        cards = claude_pick.get("cards", [])
+        for c in cards:
+            c["lines"] = [clean_line(x) for x in c.get("lines", []) if clean_line(x)]
+        probs = card_problems(cards, cpl, len(words_final), words_final)
+        if probs and not a.force_cards:
+            for k, m in probs[:80]:
+                log(f"  テロップ{k}: {m}")
+            raise RuntimeError(f"テロップのルール違反が{len(probs)}件あります。cards.json を直して再実行してください"
+                               "(このまま進めるなら --force-cards)")
+        summaries.append(claude_pick.get("summary", ""))
+        parts = []
+    else:
+        log("5/9 テロップを作成しています(Gemini: 音声+単語列+台本)…")
+        final_wav = os.path.join(D["Work"], "final_audio.wav")
+        render_audio(src_copy, keep_q, final_wav)
+        parts = chunked(words_final, final_wav, D["Work"], "cards")
     for n, (cw, mp3) in enumerate(parts):
         log(f"  {n + 1}/{len(parts)}…")
         res, model = make_cards(cw, script_text, mp3, cpl, hint=hint)
@@ -573,7 +648,7 @@ def main():
         summaries.append(res.get("summary", ""))
     # まだ残る違反は、そのテロップだけGeminiに分け直してもらう
     bad = [c for c in cards if len(c["lines"]) > 2 or any(line_width(x) > cpl for x in c["lines"])]
-    if bad:
+    if bad and a.engine == "gemini":
         log(f"  文字数オーバー {len(bad)}件 → そのテロップだけ分け直します")
         try:
             rep_res = repair_cards(bad, cpl, hint)
@@ -617,7 +692,7 @@ def main():
         st = snap_start(words_final[c["from"]]["start"], tl, dbs, thr)
         en = snap_end(words_final[c["to"]]["end"], tl, dbs, thr)
         telops.append({"k": k, "text": "\r".join(c["lines"]), "lines": c["lines"], "emphasis": bool(c.get("emphasis")),
-                       "start_sec": st, "end_sec": max(en, st + 0.5)})
+                       "sfx": c.get("sfx"), "start_sec": st, "end_sec": max(en, st + 0.5)})
     for k in range(len(telops) - 1):
         nxt = telops[k + 1]["start_sec"]
         if telops[k]["end_sec"] > nxt or nxt - telops[k]["end_sec"] < 0.4:
@@ -633,21 +708,22 @@ def main():
 
     # 7. BGM・効果音
     log("7/9 BGMと効果音を選んでいます…")
-    bgm_files, sfx_files = list_audio(a.bgm), list_audio(a.sfx)
-    if len(bgm_files) > 1:
-        # 短い曲が何度もつながらないよう、動画の長さ(最大2分)以上ある曲だけを候補にする
-        need = min(seq_frames / fps, 120)
-        long_enough = []
-        for f in bgm_files:
-            try:
-                if probe(f)["duration_sec"] >= need:
-                    long_enough.append(f)
-            except Exception:
-                pass
-        if long_enough:
-            bgm_files = long_enough
+    bgm_files, sfx_files = bgm_candidates(a.bgm, seq_frames / fps), list_audio(a.sfx)
     emph = [t for t in telops if t["emphasis"]]
-    if len(bgm_files) == 1 and len(sfx_files) <= 4:
+    if claude_pick is not None:
+        # macのファイル名は濁点が分かれた形(NFD)なので、そろえてから照合する
+        nfc = lambda s: unicodedata.normalize("NFC", s or "")  # noqa: E731
+        by_name = {nfc(os.path.basename(f)): f for f in bgm_files}
+        bgm_pick = by_name.get(nfc(claude_pick.get("bgm")))
+        if not bgm_pick:
+            log(f"  BGMが見つかりません: {claude_pick.get('bgm')}(候補の先頭を使います)")
+            bgm_pick = bgm_files[0]
+        sby = {nfc(os.path.basename(f)): f for f in sfx_files}
+        sfx_pick = [(t["k"], sby[nfc(t["sfx"])]) for t in telops if nfc(t.get("sfx")) in sby]
+        for t in telops:
+            if t.get("sfx") and nfc(t["sfx"]) not in sby:
+                log(f"  効果音が見つかりません: {t['sfx']}")
+    elif len(bgm_files) == 1 and len(sfx_files) <= 4:
         bgm_pick = bgm_files[0]
         sfx_pick = [(emph[i % max(1, len(emph))]["k"], f) for i, f in enumerate(sfx_files)] if emph else []
     else:
